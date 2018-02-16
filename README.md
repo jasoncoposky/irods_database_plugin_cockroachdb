@@ -1,6 +1,8 @@
 # irods_database_plugin_cockroachdb
 
-## build and install bulkreg_common
+## prerequisite
+
+build and install `irods_api_plugin_bulkreg_common` package
 
 ```
 git clone https://github.com/xu-hao/irods_api_bulkreg_common
