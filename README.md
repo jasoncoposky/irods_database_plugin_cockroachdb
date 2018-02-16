@@ -55,10 +55,3 @@ cmake .. -GNinja
 ```
 ninja package
 ```
-
-```
-sudo dpkg -i <package-name>
-```
-
-
-
