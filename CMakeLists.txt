@@ -64,7 +64,7 @@ foreach(PLUGIN ${IRODS_DATABASE_PLUGINS})
 
   add_library(
     ${PLUGIN}
-    MODULE
+    SHARED
     ${CMAKE_SOURCE_DIR}/src/db_plugin.cpp
     ${CMAKE_SOURCE_DIR}/src/general_query.cpp
     ${CMAKE_SOURCE_DIR}/src/general_query_setup.cpp
@@ -101,6 +101,20 @@ foreach(PLUGIN ${IRODS_DATABASE_PLUGINS})
   target_compile_options(${PLUGIN} PRIVATE -Wno-write-strings)
   set_property(TARGET ${PLUGIN} PROPERTY CXX_STANDARD ${IRODS_CXX_STANDARD})
 
+  set(
+    IRODS_DATABASE_PLUGIN_COCKROACHDB_HEADERS
+    ${CMAKE_SOURCE_DIR}/include/low_level.hpp
+    ${CMAKE_SOURCE_DIR}/include/low_level_libpq.hpp
+    ${CMAKE_SOURCE_DIR}/include/mid_level.hpp
+    )
+
+  install(
+    FILES
+    ${IRODS_DATABASE_PLUGIN_COCKROACHDB_HEADERS}
+    DESTINATION usr/include/irods/cockroachdb
+    COMPONENT ${IRODS_PACKAGE_COMPONENT_${PLUGIN_UPPERCASE}_NAME}
+    )
+    
   install(
     TARGETS
     ${PLUGIN}
