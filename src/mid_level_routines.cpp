@@ -72,10 +72,10 @@ char *cmlArraysToStrWithBind( char*         str,
 
 }
 
-int cmlOpen( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname ) {
+int cmlOpen( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname, const boost::optional<std::string> &sslmode, const boost::optional<std::string> &sslrootcert, const boost::optional<std::string> &sslcert, const boost::optional<std::string> &sslkey) {
 
     /* Connect to the DBMS */
-    int i = cllConnect( icss, host, port, dbname );
+    int i = cllConnect( icss, host, port, dbname, sslmode, sslrootcert, sslcert, sslkey );
     if ( i != 0 ) {
         return CAT_CONNECT_ERR;
     }

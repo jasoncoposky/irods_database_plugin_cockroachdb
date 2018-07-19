@@ -20,6 +20,7 @@
 #include <functional>
 #include <libpq-fe.h>
 #include <boost/variant.hpp>
+#include <boost/optional.hpp>
 
 #define MAX_BIND_VARS 32000
 
@@ -73,7 +74,7 @@ irods::error execTx(const icatSessionStruct *icss, const boost::variant<std::fun
 int execSql(const icatSessionStruct *icss, result_set **_resset, const std::string &sql, const std::vector<std::string> &bindVars = std::vector<std::string>());
 int execSql( const icatSessionStruct *icss, const std::string &sql, const std::vector<std::string> &bindVars = std::vector<std::string>());
 int execSql( const icatSessionStruct *icss, result_set **_resset, const std::function<std::string(int, int)> &_sqlgen, const std::vector<std::string> &bindVars = std::vector<std::string>(), int offset = 0, int maxrows = 256);
-int cllConnect( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname );
+int cllConnect( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname, const boost::optional<std::string> &sslmode, const boost::optional<std::string> &sslrootcert, const boost::optional<std::string> &sslcert, const boost::optional<std::string> &sslkey );
 int cllDisconnect( icatSessionStruct *icss );
 int cllExecSqlNoResult( const icatSessionStruct *icss, const char *sql );
 int cllExecSqlWithResult( const icatSessionStruct *icss, int *stmtNum, const char *sql );

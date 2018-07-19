@@ -51,6 +51,7 @@
 #include "low_level.hpp"
 #include <boost/scope_exit.hpp>
 #include <map>
+#include <boost/optional.hpp>
 
 using leaf_bundle_t = irods::resource_manager::leaf_bundle_t;
 extern irods::resource_manager resc_mgr;
@@ -1843,6 +1844,16 @@ irods::error db_debug_op(
 
 } // db_debug_op
 
+template<typename K, typename V>
+boost::optional<std::string> extract_optional(const std::unordered_map<K,V> &map, const K &key) {
+  const auto& itr = map.find(key);
+  if(itr != map.end()) {
+    return boost::any_cast<const std::string&>(itr->second);
+  } else {
+    return boost::none;
+  }
+}
+
 // =-=-=-=-=-=-=-
 // open a database connection
 irods::error db_open_op(
@@ -1884,16 +1895,21 @@ irods::error db_open_op(
         const auto& db_plugin_map = irods::get_server_property<const std::unordered_map<std::string, boost::any>>(std::vector<std::string>{irods::CFG_PLUGIN_CONFIGURATION_KW, irods::PLUGIN_TYPE_DATABASE});
         const auto& db_type = db_plugin_map.begin()->first;
         const auto& db_plugin = db_plugin_map.begin()->second;
-        snprintf(icss.databaseUsername, DB_USERNAME_LEN, "%s", boost::any_cast<const std::string&>(boost::any_cast<const std::unordered_map<std::string, boost::any>>(db_plugin).at(irods::CFG_DB_USERNAME_KW)).c_str());
-        snprintf(icss.databasePassword, DB_PASSWORD_LEN, "%s", boost::any_cast<const std::string&>(boost::any_cast<const std::unordered_map<std::string, boost::any>>(db_plugin).at(irods::CFG_DB_PASSWORD_KW)).c_str());
+	const auto& db_parameters = boost::any_cast<const std::unordered_map<std::string, boost::any>&>(db_plugin);
+        snprintf(icss.databaseUsername, DB_USERNAME_LEN, "%s", boost::any_cast<const std::string&>(db_parameters.at(irods::CFG_DB_USERNAME_KW)).c_str());
+        snprintf(icss.databasePassword, DB_PASSWORD_LEN, "%s", boost::any_cast<const std::string&>(db_parameters.at(irods::CFG_DB_PASSWORD_KW)).c_str());
         snprintf(icss.database_plugin_type, DB_TYPENAME_LEN, "%s", db_type.c_str());
 
-        const std::string host = boost::any_cast<const std::string&>(boost::any_cast<const std::unordered_map<std::string, boost::any>>(db_plugin).at(std::string("db_host")));
-        const int port = boost::any_cast<const int&>(boost::any_cast<const std::unordered_map<std::string, boost::any>>(db_plugin).at(std::string("db_port")));
-        const std::string dbname = boost::any_cast<const std::string&>(boost::any_cast<const std::unordered_map<std::string, boost::any>>(db_plugin).at(std::string("db_name")));
+        const std::string host = boost::any_cast<const std::string&>(db_parameters.at(std::string("db_host")));
+        const int port = boost::any_cast<const int&>(db_parameters.at(std::string("db_port")));
+        const std::string dbname = boost::any_cast<const std::string&>(db_parameters.at(std::string("db_name")));
+        const boost::optional<std::string> dbsslmode = extract_optional(db_parameters, std::string("db_sslmode"));
+        const boost::optional<std::string> dbsslrootcert = extract_optional(db_parameters, std::string("db_sslrootcert"));
+        const boost::optional<std::string> dbsslcert = extract_optional(db_parameters, std::string("db_sslcert"));
+        const boost::optional<std::string> dbsslkey = extract_optional(db_parameters, std::string("db_sslkey"));
         // =-=-=-=-=-=-=-
 	// call open in mid level
-	rodsLong_t status = cmlOpen( &icss, host, port, dbname );
+	rodsLong_t status = cmlOpen( &icss, host, port, dbname, dbsslmode, dbsslrootcert, dbsslcert, dbsslkey );
 	if ( 0 != status ) {
 	    return ERROR(
 		      status,

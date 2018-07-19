@@ -389,16 +389,22 @@ int cllFreeStatement(int _resinx) {
 
 
 
-
+const std::string extract_optional(const std::string& key, const boost::optional<std::string> &optional_value) {
+  if (optional_value != boost::none) {
+    return " " + key + "=" + optional_value.value(); 
+  } else {
+    return "";
+  }
+}
 
 
 /*
   Connect to the DBMS.
 */
 int
-cllConnect( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname ) {
+cllConnect( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname, const boost::optional<std::string> &sslmode, const boost::optional<std::string> &sslrootcert, const boost::optional<std::string> &sslcert, const boost::optional<std::string> &sslkey ) {
 
-    PGconn *conn = PQconnectdb(("host=" + host + " port=" + std::to_string(port) + " dbname=" + dbname + " user=" + icss->databaseUsername + " password=" + icss->databasePassword).c_str());
+  PGconn *conn = PQconnectdb(("host=" + host + " port=" + std::to_string(port) + " dbname=" + dbname + " user=" + icss->databaseUsername + " password=" + icss->databasePassword + extract_optional("sslmode", sslmode) + extract_optional("sslrootcert", sslrootcert) + extract_optional("sslcert", sslcert) + extract_optional("sslkey", sslkey)).c_str());
 
     // =-=-=-=-=-=-=-
     // initialize a connection to the catalog

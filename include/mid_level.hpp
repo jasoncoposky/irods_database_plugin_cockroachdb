@@ -15,8 +15,9 @@
 
 #include <vector>
 #include <string>
+#include <boost/optional.hpp>
 
-int cmlOpen( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname );
+int cmlOpen( icatSessionStruct *icss, const std::string &host, int port, const std::string &dbname, const boost::optional<std::string> &sslmode, const boost::optional<std::string> &sslrootcert, const boost::optional<std::string> &sslcert, const boost::optional<std::string> &sslkey );
 
 int cmlClose( icatSessionStruct *icss );
 
