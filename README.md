@@ -57,3 +57,13 @@ cmake .. -GNinja
 ```
 ninja package
 ```
+
+## secure connection parameters
+
+`sslmode` ssl mode 
+
+`sslrootcert` path to ssl root cert file 
+
+`sslcert` path to ssl cert file for client
+
+`sslkey` path to ssl key file for client (must match the database user)
