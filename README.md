@@ -62,8 +62,8 @@ ninja package
 
 `db_sslmode` ssl mode 
 
-`sslrootcert` path to ssl root cert file 
+`db_sslrootcert` path to ssl root cert file 
 
-`sslcert` path to ssl cert file for client
+`db_sslcert` path to ssl cert file for client
 
-`sslkey` path to ssl key file for client (must match the database user)
+`db_sslkey` path to ssl key file for client (must match the database user)
