@@ -60,7 +60,7 @@ ninja package
 
 ## secure connection parameters
 
-`sslmode` ssl mode 
+`db_sslmode` ssl mode 
 
 `sslrootcert` path to ssl root cert file 
 
