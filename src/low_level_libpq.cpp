@@ -242,84 +242,97 @@ std::tuple<bool, irods::error> _result_visitor::operator()(const std::tuple<bool
 
 irods::error execTx(const icatSessionStruct *icss, const boost::variant<std::function<irods::error()>, std::function<boost::variant<irods::error, std::tuple<bool, irods::error>>()>> &func) {
 
-  PGconn *conn = (PGconn *) icss->connectPtr;
+    PGconn *conn = (PGconn *) icss->connectPtr;
 
-  int result = std::get<0>(_execTxSql(conn, "begin"));
-  if(result < 0) {
-    rodsLog( LOG_NOTICE,
-                 "begin failure %d",
-                 result );
-    return ERROR( result, "begin failure" );
-  }
-  result = std::get<0>(_execTxSql(conn, "savepoint cockroach_restart"));
-  if(result < 0) {
-    rodsLog( LOG_NOTICE,
-                 "savepoint cockroach_restart failure %d",
-                 result );
-    return ERROR( result, "savepoint cockroach_restart failure" );
-  }
-  class _execTxSql_visitor : public boost::static_visitor<std::tuple<bool, irods::error>>
-  {
-  public:
-    std::tuple<bool, irods::error> operator()(const std::function<irods::error()> &func) const
-    {
-        irods::error result4 = func();
-        return std::make_tuple(result4.ok(), result4);
-    }
-
-    std::tuple<bool, irods::error> operator()(const std::function<boost::variant<irods::error, std::tuple<bool, irods::error>>()> & func) const
-    {
-        auto result = func();
-        return boost::apply_visitor(_result_visitor(), result);
-    }
-  };
-  while(true) {
-
-    std::tuple<bool, irods::error> result4 = boost::apply_visitor(_execTxSql_visitor(), func);
-    irods::error result3 = std::get<1>(result4);
-    if(!std::get<0>(result4)) {
-    /*  int result3 = std::get<0>(_execTxSql("rollback"));
-      if(result3 < 0) {
-	return CODE(result3);
-      }*/
-      return result3;
-    }
-    std::tuple<int, std::string> result2 = _execTxSql(conn, "release savepoint cockroach_restart");
-    result = std::get<0>(result2);
+    rodsLog(LOG_NOTICE, "XXXX - Calling BEGIN :: %s:%d", __FUNCTION__, __LINE__);
+    int result = std::get<0>(_execTxSql(conn, "begin"));
     if(result < 0) {
         rodsLog( LOG_NOTICE,
-                     "release savepoint cockroach_restart failure %d",
-                     result );
-      if(std::get<1>(result2) == "40001") {
-      	result = std::get<0>(_execTxSql(conn, "rollback to savepoint cockroach_restart"));
-      	if(!(result < 0)) {
-      	  continue;
-      	} else {
-      	  rodsLog( LOG_NOTICE,
-                           "rollback to savepoint cockroach_restart failure %d",
-                           result );
-      	}
-      }
-      result = std::get<0>(_execTxSql(conn, "rollback"));
-      if(result < 0) {
-        rodsLog( LOG_NOTICE,
-                     "rollback failure %d",
-                     result );
-        return ERROR( result, "rollback failure" );
-      }
-      return ERROR(std::get<0>(result2), "release savepoint cockroach_restart failure");
-
-    } else {
-      result = std::get<0>(_execTxSql(conn, "commit"));
-      if(result < 0) {
-        rodsLog( LOG_NOTICE,
-                     "commit failure %d",
-                     result );
-        return ERROR( result, "commit failure" );
-      }
-      return result3;
+                "begin failure %d",
+                result );
+        return ERROR( result, "begin failure" );
     }
-  }
+
+    rodsLog(LOG_NOTICE, "XXXX - Calling savepoint:: %s:%d", __FUNCTION__, __LINE__);
+
+    result = std::get<0>(_execTxSql(conn, "savepoint cockroach_restart"));
+    if(result < 0) {
+        rodsLog( LOG_NOTICE,
+                "savepoint cockroach_restart failure %d",
+                result );
+        return ERROR( result, "savepoint cockroach_restart failure" );
+    }
+
+
+    class _execTxSql_visitor : public boost::static_visitor<std::tuple<bool, irods::error>>
+    {
+        public:
+            std::tuple<bool, irods::error> operator()(const std::function<irods::error()> &func) const
+            {
+                irods::error result4 = func();
+                return std::make_tuple(result4.ok(), result4);
+            }
+
+            std::tuple<bool, irods::error> operator()(const std::function<boost::variant<irods::error, std::tuple<bool, irods::error>>()> & func) const
+            {
+                auto result = func();
+                return boost::apply_visitor(_result_visitor(), result);
+            }
+    };
+
+
+    rodsLog(LOG_NOTICE, "XXXX - Starting retry loop :: %s:%d", __FUNCTION__, __LINE__);
+
+    while(true) {
+
+        std::tuple<bool, irods::error> result4 = boost::apply_visitor(_execTxSql_visitor(), func);
+        irods::error result3 = std::get<1>(result4);
+        if(!std::get<0>(result4)) {
+            /*  int result3 = std::get<0>(_execTxSql("rollback"));
+                if(result3 < 0) {
+                return CODE(result3);
+                }*/
+            return result3;
+        }
+
+        std::tuple<int, std::string> result2 = _execTxSql(conn, "release savepoint cockroach_restart");
+        result = std::get<0>(result2);
+        if(result < 0) {
+            rodsLog( LOG_NOTICE,
+                    "release savepoint cockroach_restart failure %d",
+                    result );
+            if(std::get<1>(result2) == "40001") {
+                result = std::get<0>(_execTxSql(conn, "rollback to savepoint cockroach_restart"));
+                if(!(result < 0)) {
+                    continue;
+                } else {
+                    rodsLog( LOG_NOTICE,
+                            "rollback to savepoint cockroach_restart failure %d",
+                            result );
+                }
+            }
+            result = std::get<0>(_execTxSql(conn, "rollback"));
+            if(result < 0) {
+                rodsLog( LOG_NOTICE,
+                        "rollback failure %d",
+                        result );
+                return ERROR( result, "rollback failure" );
+            }
+            return ERROR(std::get<0>(result2), "release savepoint cockroach_restart failure");
+
+        } else {
+rodsLog(LOG_NOTICE, "XXXX - Calling COMMIT :: %s:%d", __FUNCTION__, __LINE__);
+            result = std::get<0>(_execTxSql(conn, "commit"));
+            if(result < 0) {
+                rodsLog( LOG_NOTICE,
+                        "commit failure %d",
+                        result );
+                return ERROR( result, "commit failure" );
+            }
+rodsLog(LOG_NOTICE, "XXXX - Done Calling COMMIT :: %s:%d", __FUNCTION__, __LINE__);
+            return result3;
+        }
+    }
 }
 
 int _execSql(PGconn *conn, const std::string &_sql, const std::vector<std::string> &bindVars, PGresult *&res) {

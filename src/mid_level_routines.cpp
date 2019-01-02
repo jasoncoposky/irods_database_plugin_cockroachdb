@@ -18,6 +18,7 @@
 #include "low_level.hpp"
 #include "irods_stacktrace.hpp"
 #include "irods_log.hpp"
+#include "irods_resource_manager.hpp"
 
 #include "rcMisc.h"
 
@@ -541,9 +542,9 @@ cmlCheckResc( const char *rescName, const char *userName, const char *userZone, 
 */
 rodsLong_t
 cmlCheckDir( const char *dirName, const char *userName, const char *userZone, const char *accessLevel,
-             const icatSessionStruct *icss ) {
+             char _coll_id[MAX_NAME_LEN], const icatSessionStruct *icss ) {
     int status;
-    rodsLong_t iVal;
+    memset(_coll_id, 0, MAX_NAME_LEN);
 
     if ( logSQL_CML != 0 ) {
         rodsLog( LOG_SQL, "cmlCheckDir SQL 1 " );
@@ -554,9 +555,9 @@ cmlCheckDir( const char *dirName, const char *userName, const char *userZone, co
     bindVars.push_back( userName );
     bindVars.push_back( userZone );
     bindVars.push_back( accessLevel );
-    status = cmlGetIntegerValueFromSql(
+    status = cmlGetStringValueFromSql(
                  "select coll_id from R_COLL_MAIN CM, R_OBJT_ACCESS OA, R_USER_GROUP UG, R_USER_MAIN UM, R_TOKN_MAIN TM where CM.coll_name=? and UM.user_name=? and UM.zone_name=? and UM.user_type_name!='rodsgroup' and UM.user_id = UG.user_id and OA.object_id = CM.coll_id and UG.group_user_id = OA.user_id and OA.access_type_id >= TM.token_id and  TM.token_namespace ='access_type' and TM.token_name = ?",
-                 &iVal, bindVars, icss );
+                 _coll_id, MAX_NAME_LEN, bindVars, icss );
     if ( status ) {
         /* There was an error, so do another sql to see which
            of the two likely cases is problem. */
@@ -567,17 +568,16 @@ cmlCheckDir( const char *dirName, const char *userName, const char *userZone, co
 
         bindVars.clear();
         bindVars.push_back( dirName );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_COLL_MAIN where coll_name=?",
-                     &iVal, bindVars, icss );
+                     _coll_id, MAX_NAME_LEN, bindVars, icss );
         if ( status ) {
             return CAT_UNKNOWN_COLLECTION;
         }
         return CAT_NO_ACCESS_PERMISSION;
     }
 
-    return iVal;
-
+    return status;
 }
 
 
@@ -587,21 +587,28 @@ cmlCheckDir( const char *dirName, const char *userName, const char *userZone, co
   While at it, get the inheritance flag.
 */
 rodsLong_t
-cmlCheckDirAndGetInheritFlag( const char *dirName, const char *userName, const char *userZone,
-                              const char *accessLevel, int *inheritFlag,
-                              const char *ticketStr, const char *ticketHost,
-                              const icatSessionStruct *icss ) {
+cmlCheckDirAndGetInheritFlag(
+    const char*              dirName,
+    const char*              userName,
+    const char*              userZone,
+    const char*              accessLevel,
+    int*                     inheritFlag,
+    const char*              ticketStr,
+    const char*              ticketHost,
+    const icatSessionStruct* icss,
+    char*                    coll_uuid_,
+    const uint32_t           uuid_len_) {
     int status;
     rodsLong_t iVal = 0;
 
     int cValSize[2];
     char *cVal[3];
-    char cValStr1[MAX_INTEGER_SIZE + 10];
+    char cValStr1[37];
     char cValStr2[MAX_INTEGER_SIZE + 10];
 
     cVal[0] = cValStr1;
     cVal[1] = cValStr2;
-    cValSize[0] = MAX_INTEGER_SIZE;
+    cValSize[0] = uuid_len_;
     cValSize[1] = MAX_INTEGER_SIZE;
 
     *inheritFlag = 0;
@@ -632,7 +639,7 @@ cmlCheckDirAndGetInheritFlag( const char *dirName, const char *userName, const c
         if ( *cVal[0] == '\0' ) {
             return CAT_NO_ROWS_FOUND;
         }
-        iVal = strtoll( *cVal, NULL, 0 );
+        rstrcpy(coll_uuid_, cVal[0], uuid_len_);
         if ( cValStr2[0] == '1' ) {
             *inheritFlag = 1;
         }
@@ -649,9 +656,9 @@ cmlCheckDirAndGetInheritFlag( const char *dirName, const char *userName, const c
 
         std::vector<std::string> bindVars;
         bindVars.push_back( dirName );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_COLL_MAIN where coll_name=?",
-                     &iVal, bindVars, icss );
+                     coll_uuid_, MAX_NAME_LEN, bindVars, icss );
         if ( status ) {
             return CAT_UNKNOWN_COLLECTION;
         }
@@ -670,7 +677,7 @@ cmlCheckDirAndGetInheritFlag( const char *dirName, const char *userName, const c
         }
     }
 
-    return iVal;
+    return 0;
 
 }
 
@@ -754,9 +761,12 @@ cmlCheckDirOwn( const char *dirName, const char *userName, const char *userZone,
 rodsLong_t
 cmlCheckDataObjOnly( const char *dirName, const char *dataName,
                      const char *userName, const char *userZone,
-                     const char *accessLevel, const icatSessionStruct *icss ) {
+                     const char *accessLevel, char _uuid_str[MAX_NAME_LEN], const icatSessionStruct *icss ) {
     int status;
-    rodsLong_t iVal;
+    char iVal[MAX_NAME_LEN];
+
+    memset(iVal, 0, MAX_NAME_LEN);
+    memset(_uuid_str, 0, MAX_NAME_LEN);
 
     if ( logSQL_CML != 0 ) {
         rodsLog( LOG_SQL, "cmlCheckDataObjOnly SQL 1 " );
@@ -768,9 +778,9 @@ cmlCheckDataObjOnly( const char *dirName, const char *dataName,
     bindVars.push_back( userName );
     bindVars.push_back( userZone );
     bindVars.push_back( accessLevel );
-    status = cmlGetIntegerValueFromSql(
+    status = cmlGetStringValueFromSql(
                  "select data_id from R_DATA_MAIN DM, R_OBJT_ACCESS OA, R_USER_GROUP UG, R_USER_MAIN UM, R_TOKN_MAIN TM, R_COLL_MAIN CM where DM.data_name=? and DM.coll_id=CM.coll_id and CM.coll_name=? and UM.user_name=? and UM.zone_name=? and UM.user_type_name!='rodsgroup' and UM.user_id = UG.user_id and OA.object_id = DM.data_id and UG.group_user_id = OA.user_id and OA.access_type_id >= TM.token_id and  TM.token_namespace ='access_type' and TM.token_name = ?",
-                 &iVal, bindVars, icss );
+                 iVal, MAX_NAME_LEN, bindVars, icss );
 
     if ( status ) {
         /* There was an error, so do another sql to see which
@@ -782,16 +792,18 @@ cmlCheckDataObjOnly( const char *dirName, const char *dataName,
         bindVars.clear();
         bindVars.push_back( dataName );
         bindVars.push_back( dirName );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select data_id from R_DATA_MAIN DM, R_COLL_MAIN CM where DM.data_name=? and DM.coll_id=CM.coll_id and CM.coll_name=?",
-                     &iVal, bindVars, icss );
+                     iVal, MAX_NAME_LEN, bindVars, icss );
         if ( status ) {
             return CAT_UNKNOWN_FILE;
         }
         return CAT_NO_ACCESS_PERMISSION;
     }
 
-    return iVal;
+    memcpy(_uuid_str, iVal, MAX_NAME_LEN);
+
+    return status;
 
 }
 
@@ -1242,9 +1254,8 @@ int cmlCheckDataObjId( const char *dataId, const char *userName,  const char *zo
                        const char *accessLevel, const char *ticketStr, const char *ticketHost,
                        const icatSessionStruct *icss ) {
     int status;
-    rodsLong_t iVal;
-
-    iVal = 0;
+    char iVal[MAX_NAME_LEN];
+    memset(iVal, 0, MAX_NAME_LEN);
     if ( ticketStr != NULL && *ticketStr != '\0' ) {
         status = checkObjIdByTicket( dataId, accessLevel, ticketStr,
                                      ticketHost, userName, zoneName,
@@ -1262,12 +1273,13 @@ int cmlCheckDataObjId( const char *dataId, const char *userName,  const char *zo
         bindVars.push_back( userName );
         bindVars.push_back( zoneName );
         bindVars.push_back( accessLevel );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select object_id from R_OBJT_ACCESS OA, R_DATA_MAIN DM, R_USER_GROUP UG, R_USER_MAIN UM, R_TOKN_MAIN TM where OA.object_id=? and UM.user_name=? and UM.zone_name=? and UM.user_type_name!='rodsgroup' and UM.user_id = UG.user_id and OA.object_id = DM.data_id and UG.group_user_id = OA.user_id and OA.access_type_id >= TM.token_id and  TM.token_namespace ='access_type' and TM.token_name = ?",
-                     &iVal,
+                     iVal,
+                     MAX_NAME_LEN,
                      bindVars,
                      icss );
-        if ( iVal == 0 ) {
+        if ( strlen(iVal) == 0 ) {
             return CAT_NO_ACCESS_PERMISSION;
         }
     }

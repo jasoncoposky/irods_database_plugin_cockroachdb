@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5.0 FATAL_ERROR) #CPACK_DEBIAN_<COMPONENT>_PACKAGE_NAME
 
-find_package(IRODS 4.3.0 REQUIRED)
+find_package(IRODS 5.0.0 REQUIRED)
 
 set(CMAKE_C_COMPILER ${IRODS_EXTERNALS_FULLPATH_CLANG}/bin/clang)
 set(CMAKE_CXX_COMPILER ${IRODS_EXTERNALS_FULLPATH_CLANG}/bin/clang++)
@@ -46,21 +46,21 @@ set(
   cockroachdb
   )
 
-configure_file(
-  ${CMAKE_SOURCE_DIR}/src/icatSysTables.sql.pp.in
-  ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp
-  @ONLY
-  )
+#configure_file(
+#  ${CMAKE_SOURCE_DIR}/src/icatSysTables.sql.pp.in
+#  ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp
+#  @ONLY
+#  )
 
 foreach(PLUGIN ${IRODS_DATABASE_PLUGINS})
   string(TOUPPER ${PLUGIN} PLUGIN_UPPERCASE)
 
-  add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql
-    COMMAND cpp -E -P -D${PLUGIN} ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql
-    MAIN_DEPENDENCY ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp
-    )
-  add_custom_target(IRODS_PHONY_TARGET_icatSysTables_${PLUGIN}.sql ALL DEPENDS ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql) # Forces execution of custom_command
+  #  add_custom_command(
+  #  OUTPUT ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql
+  #  COMMAND cpp -E -P -D${PLUGIN} ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql
+  #  MAIN_DEPENDENCY ${CMAKE_BINARY_DIR}/src/icatSysTables.sql.pp
+  #  )
+  #add_custom_target(IRODS_PHONY_TARGET_icatSysTables_${PLUGIN}.sql ALL DEPENDS ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql) # Forces execution of custom_command
 
   add_library(
     ${PLUGIN}
@@ -132,6 +132,13 @@ foreach(PLUGIN ${IRODS_DATABASE_PLUGINS})
 
   install(
     FILES
+    ${CMAKE_SOURCE_DIR}/packaging/database_plugin_control.py
+    DESTINATION ${IRODS_HOME_DIRECTORY}/scripts/irods
+    COMPONENT ${IRODS_PACKAGE_COMPONENT_${PLUGIN_UPPERCASE}_NAME}
+    )
+
+  install(
+    FILES
     ${CMAKE_SOURCE_DIR}/packaging/localhost_setup_${PLUGIN}.input
     DESTINATION ${IRODS_HOME_DIRECTORY}/packaging
     COMPONENT ${IRODS_PACKAGE_COMPONENT_${PLUGIN_UPPERCASE}_NAME}
@@ -141,19 +148,10 @@ foreach(PLUGIN ${IRODS_DATABASE_PLUGINS})
   install(
     FILES
     ${CMAKE_SOURCE_DIR}/src/icatDropSysTables.sql
-    ${CMAKE_SOURCE_DIR}/src/icatSysInserts.sql
     ${CMAKE_SOURCE_DIR}/src/icatPurgeRecycleBin.sql
+    ${CMAKE_SOURCE_DIR}/src/icatSysTables.sql
     DESTINATION ${IRODS_HOME_DIRECTORY}/packaging/sql
     COMPONENT ${IRODS_PACKAGE_COMPONENT_${PLUGIN_UPPERCASE}_NAME}
-    PERMISSIONS OWNER_READ GROUP_READ WORLD_READ
-    )
-
-  install(
-    FILES
-    ${CMAKE_BINARY_DIR}/icatSysTables_${PLUGIN}.sql
-    DESTINATION ${IRODS_HOME_DIRECTORY}/packaging/sql
-    COMPONENT ${IRODS_PACKAGE_COMPONENT_${PLUGIN_UPPERCASE}_NAME}
-    RENAME icatSysTables.sql
     PERMISSIONS OWNER_READ GROUP_READ WORLD_READ
     )
 

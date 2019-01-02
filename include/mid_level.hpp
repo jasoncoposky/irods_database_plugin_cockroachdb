@@ -148,15 +148,22 @@ rodsLong_t cmlGetNextSeqVal( const icatSessionStruct *icss );
 int cmlGetNextSeqStr( char *seqStr, int maxSeqStrLen, const icatSessionStruct *icss );
 
 rodsLong_t cmlCheckDir( const char *dirName, const char *userName, const char *userZone,
-                        const char *accessLevel, const icatSessionStruct *icss );
+                        const char *accessLevel, char[MAX_NAME_LEN], const icatSessionStruct *icss );
 
 rodsLong_t cmlCheckResc( const char *rescName, const char *userName, const char *userZone,
                          const char *accessLevel, const icatSessionStruct *icss );
 
-rodsLong_t cmlCheckDirAndGetInheritFlag( const char *dirName, const char *userName,
-        const char *userZone, const char *accessLevel,
-        int *inheritFlag, const char *ticketStr, const char *ticketHost,
-        const icatSessionStruct *icss );
+rodsLong_t cmlCheckDirAndGetInheritFlag(
+    const char *dirName,
+    const char *userName,
+    const char *userZone,
+    const char *accessLevel,
+    int *inheritFlag,
+    const char *ticketStr,
+    const char *ticketHost,
+    const icatSessionStruct *icss,
+    char*          coll_uuid_,
+    const uint32_t uuid_len_);
 
 rodsLong_t cmlCheckDirId( const char *dirId, const char *userName, const char *userZone,
                           const char *accessLevel, const icatSessionStruct *icss );
@@ -174,7 +181,7 @@ int cmlTicketUpdateWriteBytes( const char *ticketStr,
                                const icatSessionStruct *icss );
 
 rodsLong_t cmlCheckDataObjOnly( const char *dirName, const char *dataName, const char *userName,
-                                const char *userZone, const char *accessLevel, const icatSessionStruct *icss );
+                                const char *userZone, const char *accessLevel, char _uuid_str[MAX_NAME_LEN], const icatSessionStruct *icss );
 
 rodsLong_t cmlCheckDataObjOwn( const char *dirName, const char *dataName, const char *userName,
                                const char *userZone, const icatSessionStruct *icss );

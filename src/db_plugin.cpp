@@ -29,14 +29,15 @@
 #include "irods_server_properties.hpp"
 #include "irods_resource_manager.hpp"
 #include "irods_virtual_path.hpp"
-#include "modAccessControl.h"
-#include "checksum.hpp"
+#include "irods_lexical_cast.hpp"
 
 // =-=-=-=-=-=-=-
 // irods includes
 #include "rods.h"
 #include "rcMisc.h"
 #include "miscServerFunct.hpp"
+#include "modAccessControl.h"
+#include "checksum.hpp"
 
 // =-=-=-=-=-=-=-
 // stl includes
@@ -44,14 +45,17 @@
 #include <string>
 #include <iostream>
 #include <vector>
+#include <map>
+
 #include <boost/regex.hpp>
 #include <boost/lexical_cast.hpp>
-
-#include "irods_lexical_cast.hpp"
-#include "low_level.hpp"
 #include <boost/scope_exit.hpp>
-#include <map>
 #include <boost/optional.hpp>
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_io.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+
+#include "low_level.hpp"
 
 using leaf_bundle_t = irods::resource_manager::leaf_bundle_t;
 extern irods::resource_manager resc_mgr;
@@ -81,11 +85,11 @@ irods::error _del_avu_metadata(
     int                    _nocommit );
 irods::error _move_object(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
-    rodsLong_t             _target_coll_id );
+    const char          _obj_uuid_str[MAX_NAME_LEN],
+    const char          _coll_uuid_str[MAX_NAME_LEN] );
 irods::error _rename_object(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
+    const char             _obj_id[MAX_NAME_LEN],
     const char*            _new_name );
     
 //   Legal values for accessLevel in  chlModAccessControl (Access Parameter).
@@ -281,7 +285,7 @@ int get_object_count_of_resource_by_name(
     const std::string& _resc_name,
     rodsLong_t&         _count ) {
 
-    rodsLong_t resc_id;
+    irods::resource_manager::resource_id_t resc_id;
     irods::error ret = resc_mgr.hier_to_leaf_id(
                          _resc_name,
                          resc_id);
@@ -296,12 +300,7 @@ int get_object_count_of_resource_by_name(
         return ret.code();
     }
 
-    std::string resc_id_str;
-    ret = irods::lexical_cast<std::string>(resc_id, resc_id_str);
-    if(!ret.ok()) {
-        irods::log(PASS(ret));
-        return ret.code();
-    }
+    std::string resc_id_str = irods::resource_manager::uuid_to_string(resc_id);
 
     std::vector<std::string> bindVars;
     bindVars.push_back( resc_id_str );
@@ -827,10 +826,12 @@ static int _delColl( rsComm_t *rsComm, collInfo_t *collInfo ) {
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "_delColl SQL 1 " );
     }
+    char coll_id[MAX_NAME_LEN];
     status = cmlCheckDir( logicalParentDirName,
                           rsComm->clientUser.userName,
                           rsComm->clientUser.rodsZone,
                           ACCESS_MODIFY_OBJECT,
+                          coll_id,
                           &icss );
     if ( status < 0 ) {
         char errMsg[105];
@@ -854,6 +855,7 @@ static int _delColl( rsComm_t *rsComm, collInfo_t *collInfo ) {
                           rsComm->clientUser.userName,
                           rsComm->clientUser.rodsZone,
                           ACCESS_DELETE_OBJECT,
+                          coll_id,
                           &icss );
     if ( status < 0 ) {
         return status;
@@ -1176,10 +1178,14 @@ rodsLong_t checkAndGetObjectId(
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "checkAndGetObjectId SQL 1 " );
         }
+#if 0
         status = cmlCheckDataObjOnly( logicalParentDirName, logicalEndName,
                                       rsComm->clientUser.userName,
                                       rsComm->clientUser.rodsZone,
                                       access, &icss );
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
         if ( status < 0 ) {
             _rollback( "checkAndGetObjectId" );
             return status;
@@ -1193,10 +1199,11 @@ rodsLong_t checkAndGetObjectId(
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "checkAndGetObjectId SQL 2" );
         }
+        char coll_id[MAX_NAME_LEN];
         status = cmlCheckDir( name,
                               rsComm->clientUser.userName,
                               rsComm->clientUser.rodsZone,
-                              access, &icss );
+                              access, coll_id, &icss );
         if ( status < 0 ) {
             char errMsg[105];
             if ( status == CAT_UNKNOWN_COLLECTION ) {
@@ -2084,473 +2091,484 @@ irods::error db_mod_data_obj_meta_op(
     if ( !_data_obj_info ||
             !_reg_param ) {
         return ERROR(
-                   CAT_INVALID_ARGUMENT,
-                   "null parameter" );
+                CAT_INVALID_ARGUMENT,
+                "null parameter" );
     }
 
     std::function<irods::error()> tx = [&]() {
-      // =-=-=-=-=-=-=-
-      // get a postgres object from the context
-      /*irods::postgres_object_ptr pg;
-      ret = make_db_ptr( _ctx.fco(), pg );
-      if ( !ret.ok() ) {
-	  return PASS( ret );
+        // =-=-=-=-=-=-=-
+        // get a postgres object from the context
+        /*irods::postgres_object_ptr pg;
+          ret = make_db_ptr( _ctx.fco(), pg );
+          if ( !ret.ok() ) {
+          return PASS( ret );
 
-      }*/
+          }*/
 
-      // =-=-=-=-=-=-=-
-      // extract the icss property
-  //        icatSessionStruct icss;
-  //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
+        // =-=-=-=-=-=-=-
+        // extract the icss property
+        //        icatSessionStruct icss;
+        //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
 
 
-      int i = 0, j = 0, status = 0, upCols = 0;
-      rodsLong_t iVal = 0; // JMC cppcheck - uninit var
-      rodsLong_t status2 = 0;
+        int i = 0, j = 0, status = 0, upCols = 0;
+        rodsLong_t iVal = 0; // JMC cppcheck - uninit var
+        rodsLong_t status2 = 0;
 
-      int mode = 0;
+        int mode = 0;
 
-      char logicalFileName[MAX_NAME_LEN];
-      char logicalDirName[MAX_NAME_LEN];
-      char *theVal = 0;
-      char replNum1[MAX_NAME_LEN];
+        char logicalFileName[MAX_NAME_LEN];
+        char logicalDirName[MAX_NAME_LEN];
+        char *theVal = 0;
+        char replNum1[MAX_NAME_LEN];
 
-      const char* whereColsAndConds[10];
-      const char* whereValues[10];
-      char idVal[MAX_NAME_LEN];
-      int numConditions = 0;
-      char oldCopy[NAME_LEN];
-      char newCopy[NAME_LEN];
-      int adminMode = 0;
+        const char* whereColsAndConds[10];
+        const char* whereValues[10];
+        char idVal[MAX_NAME_LEN];
+        int numConditions = 0;
+        char oldCopy[NAME_LEN];
+        char newCopy[NAME_LEN];
+        int adminMode = 0;
 
-      std::vector<const char *> updateCols;
-      std::vector<const char *> updateVals;
+        std::vector<const char *> updateCols;
+        std::vector<const char *> updateVals;
 
-      /* regParamNames has the argument names (in _reg_param) that this
-	routine understands and colNames has the corresponding column
-	names; one for one. */
-      int dataTypeIndex = 1; /* matches table below for quick check */
-      // Using the keyword defines so there is one point of truth - hcj
-      const char *regParamNames[] = {
-	  REPL_NUM_KW,        DATA_TYPE_KW,       DATA_SIZE_KW,
-	  RESC_NAME_KW,       FILE_PATH_KW,       DATA_OWNER_KW,
-	  DATA_OWNER_ZONE_KW, REPL_STATUS_KW,     CHKSUM_KW,
-	  DATA_EXPIRY_KW,     DATA_COMMENTS_KW,   DATA_CREATE_KW,
-	  DATA_MODIFY_KW,     DATA_MODE_KW,       RESC_HIER_STR_KW,
-	  RESC_ID_KW, "END"
+        /* regParamNames has the argument names (in _reg_param) that this
+           routine understands and colNames has the corresponding column
+           names; one for one. */
+        int dataTypeIndex = 1; /* matches table below for quick check */
+        // Using the keyword defines so there is one point of truth - hcj
+        const char *regParamNames[] = {
+            REPL_NUM_KW,        DATA_TYPE_KW,       DATA_SIZE_KW,
+            RESC_NAME_KW,       FILE_PATH_KW,       DATA_OWNER_KW,
+            DATA_OWNER_ZONE_KW, REPL_STATUS_KW,     CHKSUM_KW,
+            DATA_EXPIRY_KW,     DATA_COMMENTS_KW,   DATA_CREATE_KW,
+            DATA_MODIFY_KW,     DATA_MODE_KW,       RESC_HIER_STR_KW,
+            RESC_ID_KW, "END"
 
-      };
+        };
 
-      /* If you update colNames, be sure to update DATA_EXPIRY_TS_IX if
-      * you add items before "data_expiry_ts" and */
-      const char *colNames[] = {
-	  "data_repl_num",   "data_type_name", "data_size",
-	  "resc_name",       "data_path",      "data_owner_name",
-	  "data_owner_zone", "data_is_dirty",  "data_checksum",
-	  "data_expiry_ts",  "r_comment",      "create_ts",
-	  "modify_ts",       "data_mode",      "resc_hier",
-	  "resc_id"
-      };
-      int DATA_EXPIRY_TS_IX = 9; /* must match index in above colNames table */
-      int MODIFY_TS_IX = 12;   /* must match index in above colNames table */
+        /* If you update colNames, be sure to update DATA_EXPIRY_TS_IX if
+         * you add items before "data_expiry_ts" and */
+        const char *colNames[] = {
+            "data_repl_num",   "data_type_name", "data_size",
+            "resc_name",       "data_path",      "data_owner_name",
+            "data_owner_zone", "data_is_dirty",  "data_checksum",
+            "data_expiry_ts",  "r_comment",      "create_ts",
+            "modify_ts",       "data_mode",      "resc_hier",
+            "resc_id"
+        };
+        int DATA_EXPIRY_TS_IX = 9; /* must match index in above colNames table */
+        int MODIFY_TS_IX = 12;   /* must match index in above colNames table */
 
-      int DATA_SIZE_IX = 2;    /* must match index in above colNames table */
-      int doingDataSize = 0;
-      char dataSizeString[NAME_LEN] = "";
-      char objIdString[MAX_NAME_LEN];
-      char *neededAccess = 0;
+        int DATA_SIZE_IX = 2;    /* must match index in above colNames table */
+        int doingDataSize = 0;
+        char dataSizeString[NAME_LEN] = "";
+        char *neededAccess = 0;
 
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlModDataObjMeta" );
-      }
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlModDataObjMeta" );
+        }
 
-      adminMode = 0;
-      theVal = getValByKey( _reg_param, ADMIN_KW );
-      if ( theVal != NULL ) {
-	  adminMode = 1;
-      }
+        adminMode = 0;
+        theVal = getValByKey( _reg_param, ADMIN_KW );
+        if ( theVal != NULL ) {
+            adminMode = 1;
+        }
 
-      std::string update_resc_id_str;
+        std::string update_resc_id_str;
 
-      bool update_resc_id = false;
-      /* Set up the updateCols and updateVals arrays */
-      for ( i = 0, j = 0; strcmp( regParamNames[i], "END" ); i++ ) {
-	  theVal = getValByKey( _reg_param, regParamNames[i] );
-	  if ( theVal != NULL ) {
-	      if( std::string( "resc_name") == colNames[i]) {
-		  continue;
-	      }
-	      else if( std::string( "resc_hier") == colNames[i]) {
-		  updateCols.push_back( "resc_id" );
+        bool update_resc_id = false;
+        /* Set up the updateCols and updateVals arrays */
+        for ( i = 0, j = 0; strcmp( regParamNames[i], "END" ); i++ ) {
+            theVal = getValByKey( _reg_param, regParamNames[i] );
+            if ( theVal != NULL ) {
+                if( std::string( "resc_name") == colNames[i]) {
+                    continue;
+                }
+                else if( std::string( "resc_hier") == colNames[i]) {
+                    updateCols.push_back( "resc_id" );
 
-		  rodsLong_t resc_id;
-		  resc_mgr.hier_to_leaf_id(theVal,resc_id);
+                    irods::resource_manager::resource_id_t resc_id;
+                    resc_mgr.hier_to_leaf_id(theVal,resc_id);
 
-		  update_resc_id_str = boost::lexical_cast<std::string>(resc_id);
-		  updateVals.push_back( update_resc_id_str.c_str() );
-	      } else {
-		  updateCols.push_back( colNames[i] );
-		  updateVals.push_back( theVal );
-	      }
 
-	      if ( std::string( "resc_id" ) == colNames[i] || std::string( "resc_hier") == colNames[i]) {
-		  update_resc_id = true;
-	      }
+                    update_resc_id_str = irods::resource_manager::uuid_to_string(resc_id);
+                    updateVals.push_back( update_resc_id_str.c_str() );
+                } else {
+                    updateCols.push_back( colNames[i] );
+                    updateVals.push_back( theVal );
+                }
 
-	      if ( i == DATA_EXPIRY_TS_IX ) {
-		  /* if data_expiry, make sure it's
-						in the standard time-stamp
-						format: "%011d" */
-		  if ( strcmp( colNames[i], "data_expiry_ts" ) == 0 ) { /* double check*/
-		      if ( strlen( theVal ) < 11 ) {
-			  static char theVal2[20];
-			  time_t myTimeValue;
-			  myTimeValue = atoll( theVal );
-			  snprintf( theVal2, sizeof theVal2, "%011d", ( int )myTimeValue );
-			  updateVals[j] = theVal2;
-		      }
-		  }
-	      }
+                if ( std::string( "resc_id" ) == colNames[i] || std::string( "resc_hier") == colNames[i]) {
+                    update_resc_id = true;
+                }
 
-	      if ( i == MODIFY_TS_IX ) {
-		  /* if modify_ts, also make sure it's
-						  in the standard time-stamp
-						  format: "%011d" */
-		  if ( strcmp( colNames[i], "modify_ts" ) == 0 ) { /* double check*/
-		      if ( strlen( theVal ) < 11 ) {
-			  static char theVal3[20];
-			  time_t myTimeValue;
-			  myTimeValue = atoll( theVal );
-			  snprintf( theVal3, sizeof theVal3, "%011d", ( int )myTimeValue );
-			  updateVals[j] = theVal3;
-		      }
-		  }
-	      }
-	      if ( i == DATA_SIZE_IX ) {
-		  doingDataSize = 1; /* flag to check size */
-		  snprintf( dataSizeString, sizeof( dataSizeString ), "%s", theVal );
-	      }
+                if ( i == DATA_EXPIRY_TS_IX ) {
+                    /* if data_expiry, make sure it's
+                       in the standard time-stamp
+format: "%011d" */
+                    if ( strcmp( colNames[i], "data_expiry_ts" ) == 0 ) { /* double check*/
+                        if ( strlen( theVal ) < 11 ) {
+                            static char theVal2[20];
+                            time_t myTimeValue;
+                            myTimeValue = atoll( theVal );
+                            snprintf( theVal2, sizeof theVal2, "%011d", ( int )myTimeValue );
+                            updateVals[j] = theVal2;
+                        }
+                    }
+                }
 
-	      j++;
+                if ( i == MODIFY_TS_IX ) {
+                    /* if modify_ts, also make sure it's
+                       in the standard time-stamp
+format: "%011d" */
+                    if ( strcmp( colNames[i], "modify_ts" ) == 0 ) { /* double check*/
+                        if ( strlen( theVal ) < 11 ) {
+                            static char theVal3[20];
+                            time_t myTimeValue;
+                            myTimeValue = atoll( theVal );
+                            snprintf( theVal3, sizeof theVal3, "%011d", ( int )myTimeValue );
+                            updateVals[j] = theVal3;
+                        }
+                    }
+                }
+                if ( i == DATA_SIZE_IX ) {
+                    doingDataSize = 1; /* flag to check size */
+                    snprintf( dataSizeString, sizeof( dataSizeString ), "%s", theVal );
+                }
 
-	      /* If the datatype is being updated, check that it is valid */
-	      if ( i == dataTypeIndex ) {
-		  status = cmlCheckNameToken( "data_type",
-					      theVal, &icss );
-		  if ( status != 0 ) {
-		      std::stringstream msg;
-		      msg << __FUNCTION__;
-		      msg << " - Invalid data type specified.";
-		      addRErrorMsg( &_ctx.comm()->rError, 0, msg.str().c_str() );
-		      return ERROR(
-				CAT_INVALID_DATA_TYPE,
-				msg.str() );
-		  }
-	      }
-	  }
-      }
-      upCols = j;
+                j++;
 
-      /* If the only field is the chksum then the user only needs read
-	access since we can trust that the server-side code is
-	calculating it properly and checksum is a system-managed field.
-	For example, when doing an irsync the server may calculate a
-	checksum and want to set it in the source copy.
-      */
-      neededAccess = ACCESS_MODIFY_METADATA;
-      if ( upCols == 1 && strcmp( updateCols[0], "chksum" ) == 0 ) {
-	  neededAccess = ACCESS_READ_OBJECT;
-      }
+                /* If the datatype is being updated, check that it is valid */
+                if ( i == dataTypeIndex ) {
+                    status = cmlCheckNameToken( "data_type",
+                            theVal, &icss );
+                    if ( status != 0 ) {
+                        std::stringstream msg;
+                        msg << __FUNCTION__;
+                        msg << " - Invalid data type specified.";
+                        addRErrorMsg( &_ctx.comm()->rError, 0, msg.str().c_str() );
+                        return ERROR(
+                                CAT_INVALID_DATA_TYPE,
+                                msg.str() );
+                    }
+                }
+            }
+        }
+        upCols = j;
 
-      /* If dataExpiry is being updated, user needs to have
-	a greater access permission */
-      theVal = getValByKey( _reg_param, DATA_EXPIRY_KW );
-      if ( theVal != NULL ) {
-	  neededAccess = ACCESS_DELETE_OBJECT;
-      }
+        /* If the only field is the chksum then the user only needs read
+           access since we can trust that the server-side code is
+           calculating it properly and checksum is a system-managed field.
+           For example, when doing an irsync the server may calculate a
+           checksum and want to set it in the source copy.
+           */
+        neededAccess = ACCESS_MODIFY_METADATA;
+        if ( upCols == 1 && strcmp( updateCols[0], "chksum" ) == 0 ) {
+            neededAccess = ACCESS_READ_OBJECT;
+        }
 
-      if ( _data_obj_info->dataId <= 0 ) {
+        /* If dataExpiry is being updated, user needs to have
+           a greater access permission */
+        theVal = getValByKey( _reg_param, DATA_EXPIRY_KW );
+        if ( theVal != NULL ) {
+            neededAccess = ACCESS_DELETE_OBJECT;
+        }
 
-	  status = splitPathByKey( _data_obj_info->objPath,
-				  logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
+        if ( !irods::resource_manager::uuid_data_is_valid(_data_obj_info->resc_uuid_data) ) {
 
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlModDataObjMeta SQL 1 " );
-	  }
-	  {
-	      std::vector<std::string> bindVars;
-	      bindVars.push_back( logicalDirName );
-	      status = cmlGetIntegerValueFromSql(
-			  "select coll_id from R_COLL_MAIN where coll_name=?", &iVal,
-			  bindVars, &icss );
-	  }
+            status = splitPathByKey( _data_obj_info->objPath,
+                    logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
 
-	  if ( status != 0 ) {
-	      char errMsg[105];
-	      snprintf( errMsg, 100, "collection '%s' is unknown",
-			logicalDirName );
-	      addRErrorMsg( &_ctx.comm()->rError, 0, errMsg );
-	      _rollback( "chlModDataObjMeta" );
-	      return ERROR(
-			CAT_UNKNOWN_COLLECTION,
-			"failed with unknown collection" );
-	  }
-	  snprintf( objIdString, MAX_NAME_LEN, "%lld", iVal );
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlModDataObjMeta SQL 1 " );
+            }
 
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlModDataObjMeta SQL 2" );
-	  }
-	  {
-	      std::vector<std::string> bindVars;
-	      bindVars.push_back( objIdString );
-	      bindVars.push_back( logicalFileName );
-	      status = cmlGetIntegerValueFromSql(
-			  "select data_id from R_DATA_MAIN where coll_id=? and data_name=?",
-			  &iVal, bindVars, &icss );
-	  }
-	  if ( status != 0 ) {
-	      std::stringstream msg;
-	      msg << __FUNCTION__;
-	      msg << " - Failed to find file in database by its logical path.";
-	      addRErrorMsg( &_ctx.comm()->rError, 0, msg.str().c_str() );
-	      _rollback( "chlModDataObjMeta" );
-	      return ERROR(
-			CAT_UNKNOWN_FILE,
-			"failed with unknown file" );
-	  }
+            char coll_uuid_str[MAX_NAME_LEN];
+            memset(coll_uuid_str, 0, MAX_NAME_LEN);
 
-	  _data_obj_info->dataId = iVal;  /* return it for possible use next time, */
-	  /* and for use below */
-      }
+            {
+                std::vector<std::string> bindVars;
+                bindVars.push_back( logicalDirName );
+                status = cmlGetStringValueFromSql(
+                        "select coll_id from R_COLL_MAIN where coll_name=?", coll_uuid_str, MAX_NAME_LEN,
+                        bindVars, &icss );
+            }
 
-      snprintf( objIdString, MAX_NAME_LEN, "%lld", _data_obj_info->dataId );
+            if ( status != 0 ) {
+                char errMsg[105];
+                snprintf( errMsg, 100, "collection '%s' is unknown",
+                        logicalDirName );
+                addRErrorMsg( &_ctx.comm()->rError, 0, errMsg );
+                _rollback( "chlModDataObjMeta" );
+                return ERROR(
+                        CAT_UNKNOWN_COLLECTION,
+                        "failed with unknown collection" );
+            }
 
-      if ( adminMode ) {
-	  if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
-	      return ERROR(
-			CAT_INSUFFICIENT_PRIVILEGE_LEVEL,
-			"failed with insufficient privilege" );
-	  }
-      }
-      else {
-	  if ( doingDataSize == 1 && strlen( mySessionTicket ) > 0 ) {
-	      status = cmlTicketUpdateWriteBytes( mySessionTicket,
-						  dataSizeString,
-						  objIdString, &icss );
-	      if ( status != 0 ) {
-		  return ERROR(
-			    status,
-			    "cmlTicketUpdateWriteBytes failed" );
-	      }
-	  }
+            char obj_uuid_str[MAX_NAME_LEN];
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlModDataObjMeta SQL 2" );
+            }
+            {
+                std::vector<std::string> bindVars;
+                bindVars.push_back( coll_uuid_str );
+                bindVars.push_back( logicalFileName );
+                status = cmlGetStringValueFromSql(
+                        "select data_id from R_DATA_MAIN where coll_id=? and data_name=?",
+                        obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
+            }
 
-	  status = cmlCheckDataObjId(
-		      objIdString,
-		      _ctx.comm()->clientUser.userName,
-		      _ctx.comm()->clientUser.rodsZone,
-		      neededAccess,
-		      mySessionTicket,
-		      mySessionClientAddr,
-		      &icss );
+            if ( status != 0 ) {
+                std::stringstream msg;
+                msg << __FUNCTION__;
+                msg << " - Failed to find file in database by its logical path.";
+                addRErrorMsg( &_ctx.comm()->rError, 0, msg.str().c_str() );
+                _rollback( "chlModDataObjMeta" );
+                return ERROR(
+                        CAT_UNKNOWN_FILE,
+                        "failed with unknown file" );
+            }
 
-	  if ( status != 0 ) {
-	      theVal = getValByKey( _reg_param, ACL_COLLECTION_KW );
-	      if ( theVal != NULL && upCols == 1 &&
-		      strcmp( updateCols[0], "data_path" ) == 0 ) {
-		  int len, iVal = 0; // JMC cppcheck - uninit var ( shadows prev decl? )
-		  /*
-		  In this case, the user is doing a 'imv' of a collection but one of
-		  the sub-files is not owned by them.  We decided this should be
-		  allowed and so we support it via this new ACL_COLLECTION_KW, checking
-		  that the ACL_COLLECTION matches the beginning path of the object and
-		  that the user has the appropriate access to that collection.
-		  */
-		  len = strlen( theVal );
-		  if ( strncmp( theVal, _data_obj_info->objPath, len ) == 0 ) {
+            irods::resource_manager::uuid_string_to_data(
+                    obj_uuid_str,
+                    _data_obj_info->object_uuid_data);
+            /* and for use below */
+        }
 
-		      iVal = cmlCheckDir( theVal,
-					  _ctx.comm()->clientUser.userName,
-					  _ctx.comm()->clientUser.rodsZone,
-					  ACCESS_OWN,
-					  &icss );
-		  }
-		  if ( iVal > 0 ) {
-		      status = 0;
-		  } /* Collection was found (id
-				    * returned) & user has access */
-	      }
-	      if ( status ) {
-		  _rollback( "chlModDataObjMeta" );
-		  return ERROR(
-			    CAT_NO_ACCESS_PERMISSION,
-			    "failed with no permission" );
-	      }
-	  }
-      }
+        std::string obj_uuid_str = irods::resource_manager::uuid_data_to_string(_data_obj_info->object_uuid_data);
 
-      whereColsAndConds[0] = "data_id=";
-      snprintf( idVal, MAX_NAME_LEN, "%lld", _data_obj_info->dataId );
-      whereValues[0] = idVal;
-      numConditions = 1;
+        if ( adminMode ) {
+            if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
+                return ERROR(
+                        CAT_INSUFFICIENT_PRIVILEGE_LEVEL,
+                        "failed with insufficient privilege" );
+            }
+        }
+        else {
+            if ( doingDataSize == 1 && strlen( mySessionTicket ) > 0 ) {
+                status = cmlTicketUpdateWriteBytes(
+                             mySessionTicket,
+                             dataSizeString,
+                             obj_uuid_str.c_str(),
+                             &icss );
+                if ( status != 0 ) {
+                    return ERROR(
+                            status,
+                            "cmlTicketUpdateWriteBytes failed" );
+                }
+            }
 
-      /* This is up here since this is usually called to modify the
-      * metadata of a single repl.  If ALL_KW is included, then apply
-      * this change to all replicas (by not restricting the update to
-      * only one).
-      */
-      std::string where_resc_id_str;
-      if ( getValByKey( _reg_param, ALL_KW ) == NULL ) {
-	  // use resc_id instead of replNum as it is
-	  // always set, unless resc_id is to be
-	  // updated.  replNum is sometimes 0 in various
-	  // error cases
-	  if ( update_resc_id || strlen( _data_obj_info->rescHier ) <= 0 ) {
-	      j = numConditions;
-	      whereColsAndConds[j] = "data_repl_num=";
-	      snprintf( replNum1, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
-	      whereValues[j] = replNum1;
-	      numConditions++;
+            status = cmlCheckDataObjId(
+                         obj_uuid_str.c_str(),
+                         _ctx.comm()->clientUser.userName,
+                         _ctx.comm()->clientUser.rodsZone,
+                         neededAccess,
+                         mySessionTicket,
+                         mySessionClientAddr,
+                         &icss );
 
-	  }
-	  else {
-	      rodsLong_t id = 0;
-	      resc_mgr.hier_to_leaf_id( _data_obj_info->rescHier, id );
-	      where_resc_id_str = boost::lexical_cast<std::string>(id);
-	      j = numConditions;
-	      whereColsAndConds[j] = "resc_id=";
-	      whereValues[j] = where_resc_id_str.c_str();
-	      numConditions++;
-	  }
-      }
+            if ( status != 0 ) {
+                theVal = getValByKey( _reg_param, ACL_COLLECTION_KW );
+                if ( theVal != NULL && upCols == 1 &&
+                     strcmp( updateCols[0], "data_path" ) == 0 ) {
+                    int len, iVal = 0; // JMC cppcheck - uninit var ( shadows prev decl? )
+                    /*
+                       In this case, the user is doing a 'imv' of a collection but one of
+                       the sub-files is not owned by them.  We decided this should be
+                       allowed and so we support it via this new ACL_COLLECTION_KW, checking
+                       that the ACL_COLLECTION matches the beginning path of the object and
+                       that the user has the appropriate access to that collection.
+                       */
+                    len = strlen( theVal );
+                    if ( strncmp( theVal, _data_obj_info->objPath, len ) == 0 ) {
+                        char coll_id[MAX_NAME_LEN];
+                        iVal = cmlCheckDir(
+                                   theVal,
+                                   _ctx.comm()->clientUser.userName,
+                                   _ctx.comm()->clientUser.rodsZone,
+                                   ACCESS_OWN,
+                                   coll_id,
+                                   &icss );
+                    }
+                    if ( iVal > 0 ) {
+                        status = 0;
+                    } /* Collection was found (id
+                       * returned) & user has access */
+                }
+                if ( status ) {
+                    _rollback( "chlModDataObjMeta" );
+                    return ERROR(
+                            CAT_NO_ACCESS_PERMISSION,
+                            "failed with no permission" );
+                }
+            }
+        }
 
-      mode = 0;
-      if ( getValByKey( _reg_param, ALL_REPL_STATUS_KW ) ) {
-	  mode = 1;
-	  /* mark this one as NEWLY_CREATED_COPY and others as OLD_COPY */
-      }
+        whereColsAndConds[0] = "data_id=";
+        snprintf( idVal, MAX_NAME_LEN, "%s", obj_uuid_str.c_str());
+        whereValues[0] = idVal;
+        numConditions = 1;
 
-      std::string zone;
-      ret = getLocalZone(
-		_ctx.prop_map(),
-		&icss,
-		zone );
-      if ( !ret.ok() ) {
-	  rodsLog( LOG_ERROR, "chlModObjMeta - failed in getLocalZone with status [%d]", status );
-	  return PASS( ret );
-      }
+        /* This is up here since this is usually called to modify the
+         * metadata of a single repl.  If ALL_KW is included, then apply
+         * this change to all replicas (by not restricting the update to
+         * only one).
+         */
+        std::string where_resc_id_str;
+        if ( getValByKey( _reg_param, ALL_KW ) == NULL ) {
+            // use resc_id instead of replNum as it is
+            // always set, unless resc_id is to be
+            // updated.  replNum is sometimes 0 in various
+            // error cases
+            if ( update_resc_id || strlen( _data_obj_info->rescHier ) <= 0 ) {
+                j = numConditions;
+                whereColsAndConds[j] = "data_repl_num=";
+                snprintf( replNum1, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
+                whereValues[j] = replNum1;
+                numConditions++;
 
-      // If we are moving the data object from one resource to another resource, update the object counts for those resources
-      // appropriately - hcj
-      char* new_resc_hier = getValByKey( _reg_param, RESC_HIER_STR_KW );
-      if ( new_resc_hier != NULL ) {
-	  std::stringstream id_stream;
-	  id_stream << _data_obj_info->dataId;
-	  std::stringstream repl_stream;
-	  repl_stream << _data_obj_info->replNum;
-	  rodsLong_t resc_id = 0;
-	  {
-	      std::vector<std::string> bindVars;
-	      bindVars.push_back( id_stream.str() );
-	      bindVars.push_back( repl_stream.str() );
-	      status = cmlGetIntegerValueFromSql(
-			  "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
-			  &resc_id, bindVars, &icss );
-	  }
-	  if ( status != 0 ) {
-	      std::stringstream msg;
-	      msg << __FUNCTION__;
-	      msg << " - Failed to get the resc hierarchy from object with id: ";
-	      msg << id_stream.str();
-	      msg << " and replNum: ";
-	      msg << repl_stream.str();
-	      irods::log( LOG_NOTICE, msg.str() );
-	      return ERROR(
-			status,
-			msg.str() );
-	  }
+            }
+            else {
+                irods::resource_manager::resource_id_t resc_id;
+                resc_mgr.hier_to_leaf_id( _data_obj_info->rescHier, resc_id );
+                where_resc_id_str = irods::resource_manager::uuid_to_string(resc_id);
+                j = numConditions;
+                whereColsAndConds[j] = "resc_id=";
+                whereValues[j] = where_resc_id_str.c_str();
+                numConditions++;
+            }
+        }
 
-      }
+        mode = 0;
+        if ( getValByKey( _reg_param, ALL_REPL_STATUS_KW ) ) {
+            mode = 1;
+            /* mark this one as NEWLY_CREATED_COPY and others as OLD_COPY */
+        }
 
-      if ( mode == 0 ) {
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlModDataObjMeta SQL 4" );
-	  }
-	  status = cmlModifySingleTable(
-		      "R_DATA_MAIN",
-		      &( updateCols[0] ),
-		      &( updateVals[0] ),
-		      whereColsAndConds,
-		      whereValues,
-		      upCols,
-		      numConditions,
-		      &icss );
-      }
-      else {
-	  /* mark this one as NEWLY_CREATED_COPY and others as OLD_COPY */
-	  j = upCols;
-	  updateCols.push_back( "data_is_dirty" );
-	  snprintf( newCopy, NAME_LEN, "%d", NEWLY_CREATED_COPY );
-	  updateVals.push_back( newCopy );
-	  upCols++;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlModDataObjMeta SQL 5" );
-	  }
-	  status = cmlModifySingleTable(
-		      "R_DATA_MAIN",
-		      &( updateCols[0] ),
-		      &( updateVals[0] ),
-		      whereColsAndConds,
-		      whereValues,
-		      upCols,
-		      numConditions,
-		      &icss );
-	  if ( status == 0 ) {
-	      j = numConditions - 1;
-	      whereColsAndConds[j] = "data_repl_num!=";
-	      snprintf( replNum1, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
-	      whereValues[j] = replNum1;
+        std::string zone;
+        ret = getLocalZone(
+                _ctx.prop_map(),
+                &icss,
+                zone );
+        if ( !ret.ok() ) {
+            rodsLog( LOG_ERROR, "chlModObjMeta - failed in getLocalZone with status [%d]", status );
+            return PASS( ret );
+        }
 
-	      updateCols[0] = "data_is_dirty";
-	      snprintf( oldCopy, NAME_LEN, "%d", OLD_COPY );
-	      updateVals[0] = oldCopy;
-	      if ( logSQL != 0 ) {
-		  rodsLog( LOG_SQL, "chlModDataObjMeta SQL 6" );
-	      }
-	      status2 = cmlModifySingleTable( "R_DATA_MAIN", &( updateCols[0] ), &( updateVals[0] ),
-					      whereColsAndConds, whereValues, 1,
-					      numConditions, &icss );
+        // If we are moving the data object from one resource to another resource, update the object counts for those resources
+        // appropriately - hcj
+        char* new_resc_hier = getValByKey( _reg_param, RESC_HIER_STR_KW );
+        if ( new_resc_hier != NULL ) {
+            std::stringstream id_stream;
+            id_stream << obj_uuid_str.c_str();
+            std::stringstream repl_stream;
+            repl_stream << _data_obj_info->replNum;
+            rodsLong_t resc_id = 0;
+            {
+                std::vector<std::string> bindVars;
+                bindVars.push_back( id_stream.str() );
+                bindVars.push_back( repl_stream.str() );
+                status = cmlGetIntegerValueFromSql(
+                        "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
+                        &resc_id, bindVars, &icss );
+            }
+            if ( status != 0 ) {
+                std::stringstream msg;
+                msg << __FUNCTION__;
+                msg << " - Failed to get the resc hierarchy from object with id: ";
+                msg << id_stream.str();
+                msg << " and replNum: ";
+                msg << repl_stream.str();
+                irods::log( LOG_NOTICE, msg.str() );
+                return ERROR(
+                        status,
+                        msg.str() );
+            }
 
-	      if ( status2 != 0 && status2 != CAT_SUCCESS_BUT_WITH_NO_INFO ) {
-		  /* Ignore NO_INFO errors but not others */
-		  rodsLog( LOG_NOTICE,
-			  "chlModDataObjMeta cmlModifySingleTable failure for other replicas %d",
-			  status2 );
-		  _rollback( "chlModDataObjMeta" );
-		  return ERROR(
-			    status2,
-			    "cmlModifySingleTable failure for other replicas" );
-	      }
+        }
 
-	  }
-      }
-      if ( status != 0 ) {
-	  _rollback( "chlModDataObjMeta" );
-	  rodsLog( LOG_NOTICE,
-		  "chlModDataObjMeta cmlModifySingleTable failure %d",
-		  status );
-	  return ERROR(
-		    status,
-		    "cmlModifySingleTable failure" );
-      }
+        if ( mode == 0 ) {
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlModDataObjMeta SQL 4" );
+            }
+            status = cmlModifySingleTable(
+                    "R_DATA_MAIN",
+                    &( updateCols[0] ),
+                    &( updateVals[0] ),
+                    whereColsAndConds,
+                    whereValues,
+                    upCols,
+                    numConditions,
+                    &icss );
+        }
+        else {
+            /* mark this one as NEWLY_CREATED_COPY and others as OLD_COPY */
+            j = upCols;
+            updateCols.push_back( "data_is_dirty" );
+            snprintf( newCopy, NAME_LEN, "%d", NEWLY_CREATED_COPY );
+            updateVals.push_back( newCopy );
+            upCols++;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlModDataObjMeta SQL 5" );
+            }
+            status = cmlModifySingleTable(
+                    "R_DATA_MAIN",
+                    &( updateCols[0] ),
+                    &( updateVals[0] ),
+                    whereColsAndConds,
+                    whereValues,
+                    upCols,
+                    numConditions,
+                    &icss );
+            if ( status == 0 ) {
+                j = numConditions - 1;
+                whereColsAndConds[j] = "data_repl_num!=";
+                snprintf( replNum1, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
+                whereValues[j] = replNum1;
 
-      return CODE( status );
+                updateCols[0] = "data_is_dirty";
+                snprintf( oldCopy, NAME_LEN, "%d", OLD_COPY );
+                updateVals[0] = oldCopy;
+                if ( logSQL != 0 ) {
+                    rodsLog( LOG_SQL, "chlModDataObjMeta SQL 6" );
+                }
+                status2 = cmlModifySingleTable( "R_DATA_MAIN", &( updateCols[0] ), &( updateVals[0] ),
+                        whereColsAndConds, whereValues, 1,
+                        numConditions, &icss );
+
+                if ( status2 != 0 && status2 != CAT_SUCCESS_BUT_WITH_NO_INFO ) {
+                    /* Ignore NO_INFO errors but not others */
+                    rodsLog( LOG_NOTICE,
+                            "chlModDataObjMeta cmlModifySingleTable failure for other replicas %d",
+                            status2 );
+                    _rollback( "chlModDataObjMeta" );
+                    return ERROR(
+                            status2,
+                            "cmlModifySingleTable failure for other replicas" );
+                }
+
+            }
+        }
+        if ( status != 0 ) {
+            _rollback( "chlModDataObjMeta" );
+            rodsLog( LOG_NOTICE,
+                    "chlModDataObjMeta cmlModifySingleTable failure %d",
+                    status );
+            return ERROR(
+                    status,
+                    "cmlModifySingleTable failure" );
+        }
+
+        return CODE( status );
 
     };
-//    if ( !( _data_obj_info->flags & NO_COMMIT_FLAG ) ) {
-      return execTx( &icss, tx );
-//    } else {
-//      return tx();
-//    }
+    //    if ( !( _data_obj_info->flags & NO_COMMIT_FLAG ) ) {
+    return execTx( &icss, tx );
+    //    } else {
+    //      return tx();
+    //    }
 } // db_mod_data_obj_meta_op
 
 
@@ -2570,222 +2588,225 @@ irods::error db_reg_data_obj_op(
     // check the params
     if ( !_data_obj_info ) {
         return ERROR(
-                   CAT_INVALID_ARGUMENT,
-                   "null parameter" );
+                CAT_INVALID_ARGUMENT,
+                "null parameter" );
     }
 
     if ( logSQL != 0 ) {
-    rodsLog( LOG_SQL, "chlRegDataObj" );
+        rodsLog( LOG_SQL, "chlRegDataObj" );
     }
     if ( !icss.status ) {
-    return ERROR( CATALOG_NOT_CONNECTED, "catalog not connected" );
+        return ERROR( CATALOG_NOT_CONNECTED, "catalog not connected" );
     }
 
     if ( logSQL != 0 ) {
-    rodsLog( LOG_SQL, "chlRegDataObj SQL 1 " );
+        rodsLog( LOG_SQL, "chlRegDataObj SQL 1 " );
     }
 
     std::function<irods::error()> func = [&]() {
-      // =-=-=-=-=-=-=-
-      // get a postgres object from the context
-      /*irods::postgres_object_ptr pg;
-      ret = make_db_ptr( _ctx.fco(), pg );
-      if ( !ret.ok() ) {
-	  return PASS( ret );
+        // =-=-=-=-=-=-=-
+        // get a postgres object from the context
+        /*irods::postgres_object_ptr pg;
+          ret = make_db_ptr( _ctx.fco(), pg );
+          if ( !ret.ok() ) {
+          return PASS( ret );
 
-      }*/
+          }*/
 
-      // =-=-=-=-=-=-=-
-      // extract the icss property
-  //        icatSessionStruct icss;
-  //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
+        // =-=-=-=-=-=-=-
+        // extract the icss property
+        //        icatSessionStruct icss;
+        //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
 
-      // =-=-=-=-=-=-=-
-      //
-      char myTime[50];
-      char logicalFileName[MAX_NAME_LEN];
-      char logicalDirName[MAX_NAME_LEN];
-      rodsLong_t seqNum;
-      rodsLong_t iVal;
-      char dataIdNum[MAX_NAME_LEN];
-      char collIdNum[MAX_NAME_LEN];
-      char dataReplNum[MAX_NAME_LEN];
-      char dataSizeNum[MAX_NAME_LEN];
-      char dataStatusNum[MAX_NAME_LEN];
-      char data_expiry_ts[] = { "00000000000" };
-      rodsLong_t status;
-      int inheritFlag;
+        // =-=-=-=-=-=-=-
+        //
+        char myTime[50];
+        char logicalFileName[MAX_NAME_LEN];
+        char logicalDirName[MAX_NAME_LEN];
+        rodsLong_t iVal;
+        char collIdNum[MAX_NAME_LEN];
+        char dataReplNum[MAX_NAME_LEN];
+        char dataSizeNum[MAX_NAME_LEN];
+        char dataStatusNum[MAX_NAME_LEN];
+        char data_expiry_ts[] = { "00000000000" };
+        rodsLong_t status;
+        int inheritFlag;
+
+        boost::uuids::uuid uuid{boost::uuids::random_generator()()};
+        std::string uuid_str = boost::uuids::to_string(uuid);
+        memcpy(_data_obj_info->object_uuid_data, uuid.data, uuid.static_size()); // OUT :: for use in other fcn calls
+
+        status = splitPathByKey(
+                _data_obj_info->objPath,
+                logicalDirName,
+                MAX_NAME_LEN,
+                logicalFileName,
+                MAX_NAME_LEN, '/' );
+
+        /* Check that collection exists and user has write permission.
+           At the same time, also get the inherit flag */
+        char coll_uuid[37];
+        memset(coll_uuid, 0, sizeof(coll_uuid));
+        status = cmlCheckDirAndGetInheritFlag( logicalDirName,
+                _ctx.comm()->clientUser.userName,
+                _ctx.comm()->clientUser.rodsZone,
+                ACCESS_MODIFY_OBJECT,
+                &inheritFlag,
+                mySessionTicket,
+                mySessionClientAddr,
+                &icss,
+                coll_uuid, 37);
+        if ( status < 0 ) {
+            if ( status == CAT_UNKNOWN_COLLECTION ) {
+                std::stringstream errMsg;
+                errMsg << "collection '" << logicalDirName << "' is unknown";
+                addRErrorMsg( &_ctx.comm()->rError, 0, errMsg.str().c_str() );
+            }
+            else if ( status == CAT_NO_ACCESS_PERMISSION ) {
+                std::stringstream errMsg;
+                errMsg << "no permission to update collection '" << logicalDirName << "'";
+                addRErrorMsg( &_ctx.comm()->rError, 0, errMsg.str().c_str() );
+            }
+            _rollback( "chlRegDataObj" );
+            return ERROR( status, "" );
+        }
+
+        /* Make sure no collection already exists by this name */
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegDataObj SQL 4" );
+        }
+
+        {
+            std::vector<std::string> bindVars;
+            bindVars.push_back( _data_obj_info->objPath );
+            status = cmlGetIntegerValueFromSql(
+                    "select coll_id from R_COLL_MAIN where coll_name=?",
+                    &iVal, bindVars, &icss );
+        }
+
+        if ( status == 0 ) {
+            _rollback( "chlRegDataObj" );
+            return ERROR( CAT_NAME_EXISTS_AS_COLLECTION, "collection exists" );
+        }
+
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegDataObj SQL 5" );
+        }
+        status = cmlCheckNameToken( "data_type",
+                _data_obj_info->dataType, &icss );
+        if ( status != 0 ) {
+            _rollback( "chlRegDataObj" );
+            return ERROR( CAT_INVALID_DATA_TYPE, "invalid data type" );
+        }
+
+        snprintf( dataReplNum, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
+        snprintf( dataStatusNum, MAX_NAME_LEN, "%d", _data_obj_info->replStatus );
+        snprintf( dataSizeNum, MAX_NAME_LEN, "%lld", _data_obj_info->dataSize );
+        getNowStr( myTime );
+
+        std::string resc_id_str = irods::resource_manager::uuid_data_to_string(_data_obj_info->resc_uuid_data);
+
+        cllBindVars[0] = uuid_str.c_str();
+        cllBindVars[1] = coll_uuid;
+        cllBindVars[2] = logicalFileName;
+        cllBindVars[3] = dataReplNum;
+        cllBindVars[4] = _data_obj_info->version;
+        cllBindVars[5] = _data_obj_info->dataType;
+        cllBindVars[6] = dataSizeNum;
+        cllBindVars[7] = resc_id_str.c_str();
+        cllBindVars[8] = _data_obj_info->filePath;
+        cllBindVars[9] = _ctx.comm()->clientUser.userName;
+        cllBindVars[10] = _ctx.comm()->clientUser.rodsZone;
+        cllBindVars[11] = dataStatusNum;
+        cllBindVars[12] = _data_obj_info->chksum;
+        cllBindVars[13] = _data_obj_info->dataMode;
+        cllBindVars[14] = myTime;
+        cllBindVars[15] = myTime;
+        cllBindVars[16] = data_expiry_ts;
+        cllBindVars[17] = "EMPTY_RESC_NAME";
+        cllBindVars[18] = "EMPTY_RESC_HIER";
+        cllBindVars[19] = "EMPTY_RESC_GROUP_NAME";
+        cllBindVarCount = 20;
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegDataObj SQL 6" );
+        }
+        status =  cmlExecuteNoAnswerSql(
+                "insert into R_DATA_MAIN (data_id, coll_id, data_name, data_repl_num, data_version, data_type_name, data_size, resc_id, data_path, data_owner_name, data_owner_zone, data_is_dirty, data_checksum, data_mode, create_ts, modify_ts, data_expiry_ts, resc_name, resc_hier, resc_group_name) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                &icss );
+        if ( status != 0 ) {
+            rodsLog( LOG_NOTICE,
+                    "chlRegDataObj cmlExecuteNoAnswerSql failure %d", status );
+            _rollback( "chlRegDataObj" );
+            return ERROR( status, "chlRegDataObj cmlExecuteNoAnswerSql failure" );
+        }
+        std::string zone;
+        ret = getLocalZone(
+                _ctx.prop_map(),
+                &icss,
+                zone );
+        if ( !ret.ok() ) {
+            rodsLog( LOG_ERROR, "chlRegDataInfo - failed in getLocalZone with status [%d]", status );
+            _rollback( "chlRegDataObj" );
+            return PASS( ret );
+        }
+
+        if ( inheritFlag ) {
+            /* If inherit is set (sticky bit), then add access rows for this
+               dataobject that match those of the parent collection */
+            cllBindVars[0] = uuid_str.c_str();
+            cllBindVars[1] = myTime;
+            cllBindVars[2] = myTime;
+            cllBindVars[3] = collIdNum;
+            cllBindVarCount = 4;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlRegDataObj SQL 7" );
+            }
+            status =  cmlExecuteNoAnswerSql(
+                    "insert into R_OBJT_ACCESS (object_id, user_id, access_type_id, create_ts, modify_ts) (select ?, user_id, access_type_id, ?, ? from R_OBJT_ACCESS where object_id = ?)",
+                    &icss );
+            if ( status != 0 ) {
+                rodsLog( LOG_NOTICE,
+                        "chlRegDataObj cmlExecuteNoAnswerSql insert access failure %d",
+                        status );
+                _rollback( "chlRegDataObj" );
+                return ERROR( status, "cmlExecuteNoAnswerSql insert access failure" );
+            }
+        }
+        else {
+            cllBindVars[0] = uuid_str.c_str();
+            cllBindVars[1] = _ctx.comm()->clientUser.userName;
+            cllBindVars[2] = _ctx.comm()->clientUser.rodsZone;
+            cllBindVars[3] = ACCESS_OWN;
+            cllBindVars[4] = myTime;
+            cllBindVars[5] = myTime;
+            cllBindVarCount = 6;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlRegDataObj SQL 8" );
+            }
+            status =  cmlExecuteNoAnswerSql(
+                    "insert into R_OBJT_ACCESS values (?, (select user_id from R_USER_MAIN where user_name=? and zone_name=?), (select token_id from R_TOKN_MAIN where token_namespace = 'access_type' and token_name = ?), ?, ?)",
+                    &icss );
+            if ( status != 0 ) {
+                rodsLog( LOG_NOTICE,
+                        "chlRegDataObj cmlExecuteNoAnswerSql insert access failure %d",
+                        status );
+                _rollback( "chlRegDataObj" );
+                return ERROR( status, "cmlExecuteNoAnswerSql insert access failure" );
+            }
+        }
 
 
-      seqNum = cmlGetNextSeqVal( &icss );
-      if ( seqNum < 0 ) {
-	  rodsLog( LOG_NOTICE, "chlRegDataObj cmlGetNextSeqVal failure %d",
-		  seqNum );
-	  _rollback( "chlRegDataObj" );
-	  return ERROR( seqNum, "chlRegDataObj cmlGetNextSeqVal failure" );
-      }
-      snprintf( dataIdNum, MAX_NAME_LEN, "%lld", seqNum );
-      _data_obj_info->dataId = seqNum; /* store as output parameter */
-
-      status = splitPathByKey( _data_obj_info->objPath,
-			      logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
-
-
-      /* Check that collection exists and user has write permission.
-	At the same time, also get the inherit flag */
-      iVal = cmlCheckDirAndGetInheritFlag( logicalDirName,
-					  _ctx.comm()->clientUser.userName,
-					  _ctx.comm()->clientUser.rodsZone,
-					  ACCESS_MODIFY_OBJECT,
-					  &inheritFlag,
-					  mySessionTicket,
-					  mySessionClientAddr,
-					  &icss );
-      if ( iVal < 0 ) {
-	  if ( iVal == CAT_UNKNOWN_COLLECTION ) {
-	      std::stringstream errMsg;
-	      errMsg << "collection '" << logicalDirName << "' is unknown";
-	      addRErrorMsg( &_ctx.comm()->rError, 0, errMsg.str().c_str() );
-	  }
-	  else if ( iVal == CAT_NO_ACCESS_PERMISSION ) {
-	      std::stringstream errMsg;
-	      errMsg << "no permission to update collection '" << logicalDirName << "'";
-	      addRErrorMsg( &_ctx.comm()->rError, 0, errMsg.str().c_str() );
-	  }
-      _rollback( "chlRegDataObj" );
-	  return ERROR( iVal, "" );
-      }
-      snprintf( collIdNum, MAX_NAME_LEN, "%lld", iVal );
-
-      /* Make sure no collection already exists by this name */
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegDataObj SQL 4" );
-      }
-      {
-	  std::vector<std::string> bindVars;
-	  bindVars.push_back( _data_obj_info->objPath );
-	  status = cmlGetIntegerValueFromSql(
-		      "select coll_id from R_COLL_MAIN where coll_name=?",
-		      &iVal, bindVars, &icss );
-      }
-      if ( status == 0 ) {
-          _rollback( "chlRegDataObj" );
-	  return ERROR( CAT_NAME_EXISTS_AS_COLLECTION, "collection exists" );
-      }
-
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegDataObj SQL 5" );
-      }
-      status = cmlCheckNameToken( "data_type",
-				  _data_obj_info->dataType, &icss );
-      if ( status != 0 ) {
-          _rollback( "chlRegDataObj" );
-	  return ERROR( CAT_INVALID_DATA_TYPE, "invalid data type" );
-      }
-
-      snprintf( dataReplNum, MAX_NAME_LEN, "%d", _data_obj_info->replNum );
-      snprintf( dataStatusNum, MAX_NAME_LEN, "%d", _data_obj_info->replStatus );
-      snprintf( dataSizeNum, MAX_NAME_LEN, "%lld", _data_obj_info->dataSize );
-      getNowStr( myTime );
-
-      std::string resc_id_str = boost::lexical_cast<std::string>(_data_obj_info->rescId);
-      cllBindVars[0] = dataIdNum;
-      cllBindVars[1] = collIdNum;
-      cllBindVars[2] = logicalFileName;
-      cllBindVars[3] = dataReplNum;
-      cllBindVars[4] = _data_obj_info->version;
-      cllBindVars[5] = _data_obj_info->dataType;
-      cllBindVars[6] = dataSizeNum;
-      cllBindVars[7] = resc_id_str.c_str();
-      cllBindVars[8] = _data_obj_info->filePath;
-      cllBindVars[9] = _ctx.comm()->clientUser.userName;
-      cllBindVars[10] = _ctx.comm()->clientUser.rodsZone;
-      cllBindVars[11] = dataStatusNum;
-      cllBindVars[12] = _data_obj_info->chksum;
-      cllBindVars[13] = _data_obj_info->dataMode;
-      cllBindVars[14] = myTime;
-      cllBindVars[15] = myTime;
-      cllBindVars[16] = data_expiry_ts;
-      cllBindVars[17] = "EMPTY_RESC_NAME";
-      cllBindVars[18] = "EMPTY_RESC_HIER";
-      cllBindVars[19] = "EMPTY_RESC_GROUP_NAME";
-      cllBindVarCount = 20;
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegDataObj SQL 6" );
-      }
-      status =  cmlExecuteNoAnswerSql(
-		    "insert into R_DATA_MAIN (data_id, coll_id, data_name, data_repl_num, data_version, data_type_name, data_size, resc_id, data_path, data_owner_name, data_owner_zone, data_is_dirty, data_checksum, data_mode, create_ts, modify_ts, data_expiry_ts, resc_name, resc_hier, resc_group_name) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		    &icss );
-      if ( status != 0 ) {
-	  rodsLog( LOG_NOTICE,
-		  "chlRegDataObj cmlExecuteNoAnswerSql failure %d", status );
-	  _rollback( "chlRegDataObj" );
-	  return ERROR( status, "chlRegDataObj cmlExecuteNoAnswerSql failure" );
-      }
-      std::string zone;
-      ret = getLocalZone(
-		_ctx.prop_map(),
-		&icss,
-		zone );
-      if ( !ret.ok() ) {
-	  rodsLog( LOG_ERROR, "chlRegDataInfo - failed in getLocalZone with status [%d]", status );
-      _rollback( "chlRegDataObj" );
-	  return PASS( ret );
-      }
-
-      if ( inheritFlag ) {
-	  /* If inherit is set (sticky bit), then add access rows for this
-	    dataobject that match those of the parent collection */
-	  cllBindVars[0] = dataIdNum;
-	  cllBindVars[1] = myTime;
-	  cllBindVars[2] = myTime;
-	  cllBindVars[3] = collIdNum;
-	  cllBindVarCount = 4;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlRegDataObj SQL 7" );
-	  }
-	  status =  cmlExecuteNoAnswerSql(
-			"insert into R_OBJT_ACCESS (object_id, user_id, access_type_id, create_ts, modify_ts) (select ?, user_id, access_type_id, ?, ? from R_OBJT_ACCESS where object_id = ?)",
-			&icss );
-	  if ( status != 0 ) {
-	      rodsLog( LOG_NOTICE,
-		      "chlRegDataObj cmlExecuteNoAnswerSql insert access failure %d",
-		      status );
-	      _rollback( "chlRegDataObj" );
-	      return ERROR( status, "cmlExecuteNoAnswerSql insert access failure" );
-	  }
-      }
-      else {
-	  cllBindVars[0] = dataIdNum;
-	  cllBindVars[1] = _ctx.comm()->clientUser.userName;
-	  cllBindVars[2] = _ctx.comm()->clientUser.rodsZone;
-	  cllBindVars[3] = ACCESS_OWN;
-	  cllBindVars[4] = myTime;
-	  cllBindVars[5] = myTime;
-	  cllBindVarCount = 6;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlRegDataObj SQL 8" );
-	  }
-	  status =  cmlExecuteNoAnswerSql(
-			"insert into R_OBJT_ACCESS values (?, (select user_id from R_USER_MAIN where user_name=? and zone_name=?), (select token_id from R_TOKN_MAIN where token_namespace = 'access_type' and token_name = ?), ?, ?)",
-			&icss );
-	  if ( status != 0 ) {
-	      rodsLog( LOG_NOTICE,
-		      "chlRegDataObj cmlExecuteNoAnswerSql insert access failure %d",
-		      status );
-	      _rollback( "chlRegDataObj" );
-	      return ERROR( status, "cmlExecuteNoAnswerSql insert access failure" );
-	  }
-      }
-      return SUCCESS();
+        return SUCCESS();
     };
 
 
-//    if ( !( _data_obj_info->flags & NO_COMMIT_FLAG ) ) {
-      return execTx(&icss, func);
-//    } else {
-//      return func();
-//    }
+    //    if ( !( _data_obj_info->flags & NO_COMMIT_FLAG ) ) {
+    irods::error err =  execTx(&icss, func);
+    return err;
+
+    //    } else {
+    //      return func();
+    //    }
 
 
 } // db_reg_data_obj_op
@@ -2798,6 +2819,7 @@ irods::error db_reg_replica_op(
     dataObjInfo_t*         _src_data_obj_info,
     dataObjInfo_t*         _dst_data_obj_info,
     keyValPair_t*          _cond_input ) {
+#if 0
     // =-=-=-=-=-=-=-
     // check the context
     irods::error ret = _ctx.valid();
@@ -2808,12 +2830,12 @@ irods::error db_reg_replica_op(
     // =-=-=-=-=-=-=-
     // check the params
     if (
-        !_src_data_obj_info ||
-        !_dst_data_obj_info ||
-        !_cond_input ) {
+            !_src_data_obj_info ||
+            !_dst_data_obj_info ||
+            !_cond_input ) {
         return ERROR(
-                   CAT_INVALID_ARGUMENT,
-                   "null parameter" );
+                CAT_INVALID_ARGUMENT,
+                "null parameter" );
     }
 
     if( _dst_data_obj_info->rescId <= 0 ) {
@@ -2831,16 +2853,16 @@ irods::error db_reg_replica_op(
     // =-=-=-=-=-=-=-
     // get a postgres object from the context
     /*irods::postgres_object_ptr pg;
-    ret = make_db_ptr( _ctx.fco(), pg );
-    if ( !ret.ok() ) {
-        return PASS( ret );
+      ret = make_db_ptr( _ctx.fco(), pg );
+      if ( !ret.ok() ) {
+      return PASS( ret );
 
-    }*/
+      }*/
 
     // =-=-=-=-=-=-=-
     // extract the icss property
-//        icatSessionStruct icss;
-//        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
+    //        icatSessionStruct icss;
+    //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
 
 
     std::function<irods::error()> tx = [&]() {
@@ -2879,7 +2901,7 @@ irods::error db_reg_replica_op(
                            create_ts, \
                            modify_ts";
         const int IX_DATA_REPL_NUM = 3; /* index of data_repl_num in theColls */
-    //        int IX_RESC_GROUP_NAME = 7; /* index into theColls */
+        //        int IX_RESC_GROUP_NAME = 7; /* index into theColls */
         const int IX_RESC_ID = 10;
         const int IX_DATA_PATH = 11;    /* index into theColls */
 
@@ -2913,119 +2935,121 @@ irods::error db_reg_replica_op(
         }
 
         status = splitPathByKey( _src_data_obj_info->objPath,
-                                 logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
+                logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
 
-      if ( adminMode ) {
-	  if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
-	      return ERROR( CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "insufficient privilege" );
-	  }
-      }
-      else {
-	  /* Check the access to the dataObj */
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlRegReplica SQL 1 " );
-	  }
-	  status = cmlCheckDataObjOnly( logicalDirName, logicalFileName,
-					_ctx.comm()->clientUser.userName,
-					_ctx.comm()->clientUser.rodsZone,
-					ACCESS_READ_OBJECT, &icss );
-	  if ( status < 0 ) {
-	      _rollback( "chlRegReplica" );
-	      return ERROR( status, "cmlCheckDataObjOnly failed" );
-	  }
-      }
+        if ( adminMode ) {
+            if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
+                return ERROR( CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "insufficient privilege" );
+            }
+        }
+        else {
+            /* Check the access to the dataObj */
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlRegReplica SQL 1 " );
+            }
+            status = cmlCheckDataObjOnly( logicalDirName, logicalFileName,
+                    _ctx.comm()->clientUser.userName,
+                    _ctx.comm()->clientUser.rodsZone,
+                    ACCESS_READ_OBJECT, &icss );
+            if ( status < 0 ) {
+                _rollback( "chlRegReplica" );
+                return ERROR( status, "cmlCheckDataObjOnly failed" );
+            }
+        }
 
-      /* Get the next replica number */
-      snprintf( objIdString, MAX_NAME_LEN, "%lld", _src_data_obj_info->dataId );
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegReplica SQL 2" );
-      }
-      {
-	  std::vector<std::string> bindVars;
-	  bindVars.push_back( objIdString );
-	  status = cmlGetIntegerValueFromSql(
-		      "select max(data_repl_num) from R_DATA_MAIN where data_id = ?",
-		      &iVal, bindVars, &icss );
-      }
+        /* Get the next replica number */
+        snprintf( objIdString, MAX_NAME_LEN, "%lld", _src_data_obj_info->dataId );
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegReplica SQL 2" );
+        }
+        {
+            std::vector<std::string> bindVars;
+            bindVars.push_back( objIdString );
+            status = cmlGetIntegerValueFromSql(
+                    "select max(data_repl_num) from R_DATA_MAIN where data_id = ?",
+                    &iVal, bindVars, &icss );
+        }
 
-      if ( status != 0 ) {
-	  _rollback( "chlRegReplica" );
-	  return ERROR( status, "cmlGetIntegerValueFromSql failed" );
-      }
+        if ( status != 0 ) {
+            _rollback( "chlRegReplica" );
+            return ERROR( status, "cmlGetIntegerValueFromSql failed" );
+        }
 
-      nextReplNum = iVal + 1;
-      snprintf( nextRepl, sizeof nextRepl, "%d", nextReplNum );
-      _dst_data_obj_info->replNum = nextReplNum; /* return new replica number */
-      snprintf( replNumString, MAX_NAME_LEN, "%d", _src_data_obj_info->replNum );
-      snprintf( tSQL, MAX_SQL_SIZE,
-		"select %s from R_DATA_MAIN where data_id = ? and data_repl_num = ?",
-		theColls );
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegReplica SQL 3" );
-      }
-      result_set *resset;
-      {
-	  std::vector<std::string> bindVars;
-	  bindVars.push_back( objIdString );
-	  bindVars.push_back( replNumString );
-	  status = cmlGetOneRowFromSqlV2( tSQL, resset, cVal, nColumns, bindVars, &icss );
-      }
-      if ( status < 0 ) {
-	  _rollback( "chlRegReplica" );
-	  return ERROR( status, "cmlGetOneRowFromSqlV2 failed" );
-      }
+        nextReplNum = iVal + 1;
+        snprintf( nextRepl, sizeof nextRepl, "%d", nextReplNum );
+        _dst_data_obj_info->replNum = nextReplNum; /* return new replica number */
+        snprintf( replNumString, MAX_NAME_LEN, "%d", _src_data_obj_info->replNum );
+        snprintf( tSQL, MAX_SQL_SIZE,
+                "select %s from R_DATA_MAIN where data_id = ? and data_repl_num = ?",
+                theColls );
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegReplica SQL 3" );
+        }
+        result_set *resset;
+        {
+            std::vector<std::string> bindVars;
+            bindVars.push_back( objIdString );
+            bindVars.push_back( replNumString );
+            status = cmlGetOneRowFromSqlV2( tSQL, resset, cVal, nColumns, bindVars, &icss );
+        }
+        if ( status < 0 ) {
+            _rollback( "chlRegReplica" );
+            return ERROR( status, "cmlGetOneRowFromSqlV2 failed" );
+        }
 
-      BOOST_SCOPE_EXIT (resset) {
-	  delete resset;
-      } BOOST_SCOPE_EXIT_END
+        BOOST_SCOPE_EXIT (resset) {
+            delete resset;
+        } BOOST_SCOPE_EXIT_END
 
-      std::string resc_id_str = boost::lexical_cast<std::string>(_dst_data_obj_info->rescId);
+        std::string resc_id_str = boost::lexical_cast<std::string>(_dst_data_obj_info->rescId);
 
-      cVal[IX_DATA_REPL_NUM]   = nextRepl;
-      //cVal[IX_RESC_NAME]       = _dst_data_obj_info->rescName;
-      cVal[IX_RESC_ID]       = (char*)resc_id_str.c_str();
-      cVal[IX_DATA_PATH]       = _dst_data_obj_info->filePath;
-      cVal[IX_DATA_MODE]       = _dst_data_obj_info->dataMode;
+        cVal[IX_DATA_REPL_NUM]   = nextRepl;
+        //cVal[IX_RESC_NAME]       = _dst_data_obj_info->rescName;
+        cVal[IX_RESC_ID]       = (char*)resc_id_str.c_str();
+        cVal[IX_DATA_PATH]       = _dst_data_obj_info->filePath;
+        cVal[IX_DATA_MODE]       = _dst_data_obj_info->dataMode;
 
-      getNowStr( myTime );
-      cVal[IX_MODIFY_TS] = myTime;
-      cVal[IX_CREATE_TS] = myTime;
+        getNowStr( myTime );
+        cVal[IX_MODIFY_TS] = myTime;
+        cVal[IX_CREATE_TS] = myTime;
 
-      cVal[IX_RESC_NAME2] = (char*)resc_id_str.c_str();//_dst_data_obj_info->rescName; // JMC - backport 4669
-      cVal[IX_DATA_PATH2] = _dst_data_obj_info->filePath; // JMC - backport 4669
-      cVal[IX_DATA_ID2] = objIdString; // JMC - backport 4669
+        cVal[IX_RESC_NAME2] = (char*)resc_id_str.c_str();//_dst_data_obj_info->rescName; // JMC - backport 4669
+        cVal[IX_DATA_PATH2] = _dst_data_obj_info->filePath; // JMC - backport 4669
+        cVal[IX_DATA_ID2] = objIdString; // JMC - backport 4669
 
-      for ( i = 0; i < nColumns; i++ ) {
-	  cllBindVars[i] = cVal[i];
-      }
-      cllBindVarCount = nColumns;
-      snprintf( tSQL, MAX_SQL_SIZE, "insert into R_DATA_MAIN ( %s ) select ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? where not exists (select data_id from R_DATA_MAIN where resc_id=? and data_path=? and data_id=?)",
-		theColls );
+        for ( i = 0; i < nColumns; i++ ) {
+            cllBindVars[i] = cVal[i];
+        }
+        cllBindVarCount = nColumns;
+        snprintf( tSQL, MAX_SQL_SIZE, "insert into R_DATA_MAIN ( %s ) select ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? where not exists (select data_id from R_DATA_MAIN where resc_id=? and data_path=? and data_id=?)",
+                theColls );
 
-      if ( logSQL != 0 ) {
-	  rodsLog( LOG_SQL, "chlRegReplica SQL 4" );
-      }
-      status = cmlExecuteNoAnswerSql( tSQL,  &icss );
-      if ( status < 0 ) {
-	  rodsLog( LOG_NOTICE,
-		  "chlRegReplica cmlExecuteNoAnswerSql(insert) failure %d",
-		  status );
-	  _rollback( "chlRegReplica" );
-	  return ERROR( status, "cmlExecuteNoAnswerSql(insert) failure" );
-      }
+        if ( logSQL != 0 ) {
+            rodsLog( LOG_SQL, "chlRegReplica SQL 4" );
+        }
+        status = cmlExecuteNoAnswerSql( tSQL,  &icss );
+        if ( status < 0 ) {
+            rodsLog( LOG_NOTICE,
+                    "chlRegReplica cmlExecuteNoAnswerSql(insert) failure %d",
+                    status );
+            _rollback( "chlRegReplica" );
+            return ERROR( status, "cmlExecuteNoAnswerSql(insert) failure" );
+        }
 
-      std::string zone;
-      ret = getLocalZone( _ctx.prop_map(), &icss, zone );
-      if ( !ret.ok() ) {
-	  rodsLog( LOG_ERROR, "chlRegReplica - failed in getLocalZone with status [%d]", status );
-	  return PASS( ret );
-      }
+        std::string zone;
+        ret = getLocalZone( _ctx.prop_map(), &icss, zone );
+        if ( !ret.ok() ) {
+            rodsLog( LOG_ERROR, "chlRegReplica - failed in getLocalZone with status [%d]", status );
+            return PASS( ret );
+        }
 
 
-      return SUCCESS();
+        return SUCCESS();
     };
     return execTx( &icss, tx );
-
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
 
 } // db_reg_replica_op
 
@@ -3074,14 +3098,15 @@ irods::error db_unreg_replica_op(
         rodsLong_t status;
         char tSQL[MAX_SQL_SIZE];
         char replNumber[30];
-        char dataObjNumber[30];
+        char dataObjNumber[MAX_NAME_LEN];
         char cVal[MAX_NAME_LEN];
         int adminMode;
         int trashMode;
         char *theVal;
         char checkPath[MAX_NAME_LEN];
 
-        dataObjNumber[0] = '\0';
+        memset(dataObjNumber, 0, MAX_NAME_LEN);
+
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlUnregDataObj" );
         }
@@ -3105,173 +3130,178 @@ irods::error db_unreg_replica_op(
         }
 
         status = splitPathByKey( _data_obj_info->objPath,
-                                 logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
+                logicalDirName, MAX_NAME_LEN, logicalFileName, MAX_NAME_LEN, '/' );
 
-      if ( adminMode == 0 ) {
-	  /* Check the access to the dataObj */
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlUnregDataObj SQL 1 " );
-	  }
-	  status = cmlCheckDataObjOnly( logicalDirName, logicalFileName,
-					_ctx.comm()->clientUser.userName,
-					_ctx.comm()->clientUser.rodsZone,
-					ACCESS_DELETE_OBJECT, &icss );
-	  if ( status < 0 ) {
-	      _rollback( "chlUnregDataObj" );
-	      return ERROR( status, "cmlCheckDataObjOnly failed" ); /* convert long to int */
-	  }
-	  snprintf( dataObjNumber, sizeof dataObjNumber, "%lld", status );
-      }
-      else {
-	  if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
-	      return ERROR( CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "insufficient privilege" );
-	  }
-	  if ( trashMode ) {
-	      int len;
-	      std::string zone;
-	      ret = getLocalZone( _ctx.prop_map(), &icss, zone );
-	      if ( !ret.ok() ) {
-		  return PASS( ret );
-	      }
-	      snprintf( checkPath, MAX_NAME_LEN, "/%s/trash", zone.c_str() );
-	      len = strlen( checkPath );
-	      if ( strncmp( checkPath, logicalDirName, len ) != 0 ) {
-		  addRErrorMsg( &_ctx.comm()->rError, 0,
-				"TRASH_KW but not zone/trash path" );
-		  return ERROR( CAT_INVALID_ARGUMENT, "TRASH_KW but not zone/trash path" );
-	      }
-	      if ( _data_obj_info->dataId > 0 ) {
-		  snprintf( dataObjNumber, sizeof dataObjNumber, "%lld",
-			    _data_obj_info->dataId );
-	      }
-	  }
-	  else {
-	      if ( _data_obj_info->replNum >= 0 && _data_obj_info->dataId >= 0 ) {
-		  /* Check for a different replica */
-		  snprintf( dataObjNumber, sizeof dataObjNumber, "%lld",
-			    _data_obj_info->dataId );
-		  snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
-		  if ( logSQL != 0 ) {
-		      rodsLog( LOG_SQL, "chlUnregDataObj SQL 2" );
-		  }
-		  {
-		      std::vector<std::string> bindVars;
-		      bindVars.push_back( dataObjNumber );
-		      bindVars.push_back( replNumber );
-		      status = cmlGetStringValueFromSql(
-				  "select data_repl_num from R_DATA_MAIN where data_id=? and data_repl_num!=?",
-				  cVal, sizeof cVal, bindVars, &icss );
-		  }
-		  if ( status != 0 ) {
-		      addRErrorMsg( &_ctx.comm()->rError, 0,
-				    "This is the last replica, removal by admin not allowed" );
-		      return ERROR( CAT_LAST_REPLICA, "This is the last replica, removal by admin not allowed" );
-		  }
-	      }
-	      else {
-		  addRErrorMsg( &_ctx.comm()->rError, 0,
-				"dataId and replNum required" );
-		  _rollback( "chlUnregDataObj" );
-		  return ERROR( CAT_INVALID_ARGUMENT, "dataId and replNum required" );
-	      }
-	  }
-      }
+        if ( adminMode == 0 ) {
+            /* Check the access to the dataObj */
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlUnregDataObj SQL 1 " );
+            }
+            status = cmlCheckDataObjOnly(
+                         logicalDirName,
+                         logicalFileName,
+                         _ctx.comm()->clientUser.userName,
+                         _ctx.comm()->clientUser.rodsZone,
+                         ACCESS_DELETE_OBJECT,
+                         dataObjNumber,
+                         &icss );
+            if ( status < 0 ) {
+                _rollback( "chlUnregDataObj" );
+                return ERROR( status, "cmlCheckDataObjOnly failed" ); /* convert long to int */
+            }
+        }
+        else {
+            if ( _ctx.comm()->clientUser.authInfo.authFlag != LOCAL_PRIV_USER_AUTH ) {
+                return ERROR( CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "insufficient privilege" );
+            }
+            if ( trashMode ) {
+                int len;
+                std::string zone;
+                ret = getLocalZone( _ctx.prop_map(), &icss, zone );
+                if ( !ret.ok() ) {
+                    return PASS( ret );
+                }
+                snprintf( checkPath, MAX_NAME_LEN, "/%s/trash", zone.c_str() );
+                len = strlen( checkPath );
+                if ( strncmp( checkPath, logicalDirName, len ) != 0 ) {
+                    addRErrorMsg( &_ctx.comm()->rError, 0,
+                            "TRASH_KW but not zone/trash path" );
+                    return ERROR( CAT_INVALID_ARGUMENT, "TRASH_KW but not zone/trash path" );
+                }
+                if ( _data_obj_info->dataId > 0 ) {
+                    auto uuid = irods::resource_manager::uuid_data_to_string(_data_obj_info->object_uuid_data);
+                    snprintf(dataObjNumber,sizeof(dataObjNumber),"%s", uuid.c_str());
+                }
+            }
+            else {
+                if ( _data_obj_info->replNum >= 0 && _data_obj_info->dataId >= 0 ) {
+                    /* Check for a different replica */
+                    auto uuid = irods::resource_manager::uuid_data_to_string(_data_obj_info->object_uuid_data);
+                    snprintf(dataObjNumber,sizeof(dataObjNumber),"%s", uuid.c_str());
+                    snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
+                    if ( logSQL != 0 ) {
+                        rodsLog( LOG_SQL, "chlUnregDataObj SQL 2" );
+                    }
+                    {
+                        std::vector<std::string> bindVars;
+                        bindVars.push_back( dataObjNumber );
+                        bindVars.push_back( replNumber );
+                        status = cmlGetStringValueFromSql(
+                                "select data_repl_num from R_DATA_MAIN where data_id=? and data_repl_num!=?",
+                                cVal, sizeof cVal, bindVars, &icss );
+                    }
+                    if ( status != 0 ) {
+                        addRErrorMsg( &_ctx.comm()->rError, 0,
+                                "This is the last replica, removal by admin not allowed" );
+                        return ERROR( CAT_LAST_REPLICA, "This is the last replica, removal by admin not allowed" );
+                    }
+                }
+                else {
+                    addRErrorMsg( &_ctx.comm()->rError, 0,
+                            "dataId and replNum required" );
+                    _rollback( "chlUnregDataObj" );
+                    return ERROR( CAT_INVALID_ARGUMENT, "dataId and replNum required" );
+                }
+            }
+        }
 
-      // Get the resource name so we can update its data object count later
-      std::string resc_hier;
-      if ( strlen( _data_obj_info->rescHier ) == 0 ) {
-	  rodsLong_t resc_id = 0;
-	  if ( _data_obj_info->replNum >= 0 ) {
-	      snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
-	      {
-		  std::vector<std::string> bindVars;
-		  bindVars.push_back( dataObjNumber );
-		  bindVars.push_back( replNumber );
-		  status = cmlGetIntegerValueFromSql(
-			      "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
-			      &resc_id, bindVars, &icss );
-	      }
-	      if ( status != 0 ) {
-		  return ERROR( status, "cmlGetStringValueFromSql failed" );
-	      }
-	  }
-	  else {
-	      {
-		  std::vector<std::string> bindVars;
-		  bindVars.push_back( dataObjNumber );
-		  status = cmlGetIntegerValueFromSql(
-			      "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
-			      &resc_id, bindVars, &icss );
-	      }
-	      if ( status != 0 ) {
-		  return ERROR( status, "cmlGetStringValueFromSql failed" );
-	      }
-	  }
-	  resc_mgr.leaf_id_to_hier( resc_id, resc_hier );
-      }
-      else {
-	  resc_hier = std::string( _data_obj_info->rescHier );
-      }
+        // Get the resource name so we can update its data object count later
+        std::string resc_hier;
+        if ( strlen( _data_obj_info->rescHier ) == 0 ) {
+            char resc_id_str[37] = {0};
+            if ( _data_obj_info->replNum >= 0 ) {
+                snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
+                {
+                    std::vector<std::string> bindVars;
+                    bindVars.push_back( dataObjNumber );
+                    bindVars.push_back( replNumber );
+                    status = cmlGetStringValueFromSql(
+                            "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
+                            resc_id_str, 36, bindVars, &icss );
+                }
+                if ( status != 0 ) {
+                    return ERROR( status, "cmlGetStringValueFromSql failed" );
+                }
+            }
+            else {
+                {
+                    std::vector<std::string> bindVars;
+                    bindVars.push_back( dataObjNumber );
+                    status = cmlGetStringValueFromSql(
+                            "select resc_id from R_DATA_MAIN where data_id=? and data_repl_num=?",
+                            resc_id_str, 36, bindVars, &icss );
+                }
+                if ( status != 0 ) {
+                    return ERROR( status, "cmlGetStringValueFromSql failed" );
+                }
+            }
+            unsigned char resc_uuid_data[16];
+            irods::resource_manager::uuid_string_to_data(resc_id_str, resc_uuid_data);
+            resc_mgr.leaf_id_to_hier( resc_uuid_data, resc_hier );
+        }
+        else {
+            resc_hier = std::string( _data_obj_info->rescHier );
+        }
 
-      cllBindVars[0] = logicalDirName;
-      cllBindVars[1] = logicalFileName;
-      if ( _data_obj_info->replNum >= 0 ) {
-	  snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
-	  cllBindVars[2] = replNumber;
-	  cllBindVarCount = 3;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlUnregDataObj SQL 4" );
-	  }
-	  snprintf( tSQL, MAX_SQL_SIZE,
-		    "delete from R_DATA_MAIN where coll_id=(select coll_id from R_COLL_MAIN where coll_name=?) and data_name=? and data_repl_num=?" );
-      }
-      else {
-	  cllBindVarCount = 2;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlUnregDataObj SQL 5" );
-	  }
-	  snprintf( tSQL, MAX_SQL_SIZE,
-		    "delete from R_DATA_MAIN where coll_id=(select coll_id from R_COLL_MAIN where coll_name=?) and data_name=?" );
-      }
-      status =  cmlExecuteNoAnswerSql( tSQL, &icss );
-      if ( status != 0 ) {
-	  if ( status == CAT_SUCCESS_BUT_WITH_NO_INFO ) {
-	      char errMsg[105];
-	      status = CAT_UNKNOWN_FILE;  /* More accurate, in this case */
-	      snprintf( errMsg, 100, "data object '%s' is unknown",
-			logicalFileName );
-	      addRErrorMsg( &_ctx.comm()->rError, 0, errMsg );
-	      return ERROR( status, "data object unknown" );
-	  }
-	  _rollback( "chlUnregDataObj" );
-	  return ERROR( status, "cmlExecuteNoAnswerSql failed" );
-      }
+        cllBindVars[0] = logicalDirName;
+        cllBindVars[1] = logicalFileName;
+        if ( _data_obj_info->replNum >= 0 ) {
+            snprintf( replNumber, sizeof replNumber, "%d", _data_obj_info->replNum );
+            cllBindVars[2] = replNumber;
+            cllBindVarCount = 3;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlUnregDataObj SQL 4" );
+            }
+            snprintf( tSQL, MAX_SQL_SIZE,
+                    "delete from R_DATA_MAIN where coll_id=(select coll_id from R_COLL_MAIN where coll_name=?) and data_name=? and data_repl_num=?" );
+        }
+        else {
+            cllBindVarCount = 2;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlUnregDataObj SQL 5" );
+            }
+            snprintf( tSQL, MAX_SQL_SIZE,
+                    "delete from R_DATA_MAIN where coll_id=(select coll_id from R_COLL_MAIN where coll_name=?) and data_name=?" );
+        }
+        status =  cmlExecuteNoAnswerSql( tSQL, &icss );
+        if ( status != 0 ) {
+            if ( status == CAT_SUCCESS_BUT_WITH_NO_INFO ) {
+                char errMsg[105];
+                status = CAT_UNKNOWN_FILE;  /* More accurate, in this case */
+                snprintf( errMsg, 100, "data object '%s' is unknown",
+                        logicalFileName );
+                addRErrorMsg( &_ctx.comm()->rError, 0, errMsg );
+                return ERROR( status, "data object unknown" );
+            }
+            _rollback( "chlUnregDataObj" );
+            return ERROR( status, "cmlExecuteNoAnswerSql failed" );
+        }
 
-      std::string zone;
-      ret = getLocalZone( _ctx.prop_map(), &icss, zone );
-      if ( !ret.ok() ) {
-	  rodsLog( LOG_ERROR, "chlUnRegDataObj - failed in getLocalZone with status [%d]", status );
-	  return PASS( ret );
-      }
+        std::string zone;
+        ret = getLocalZone( _ctx.prop_map(), &icss, zone );
+        if ( !ret.ok() ) {
+            rodsLog( LOG_ERROR, "chlUnRegDataObj - failed in getLocalZone with status [%d]", status );
+            return PASS( ret );
+        }
 
-      /* delete the access rows, if we just deleted the last replica */
-      if ( dataObjNumber[0] != '\0' ) {
-	  cllBindVars[0] = dataObjNumber;
-	  cllBindVars[1] = dataObjNumber;
-	  cllBindVarCount = 2;
-	  if ( logSQL != 0 ) {
-	      rodsLog( LOG_SQL, "chlUnregDataObj SQL 3" );
-	  }
-	  status = cmlExecuteNoAnswerSql(
-		      "delete from R_OBJT_ACCESS where object_id=? and not exists (select * from R_DATA_MAIN where data_id=?)", &icss );
-	  if ( status == 0 ) {
-	      removeMetaMapAndAVU( dataObjNumber ); /* remove AVU metadata, if any */
-	  }
-      }
+        /* delete the access rows, if we just deleted the last replica */
+        if ( dataObjNumber[0] != '\0' ) {
+            cllBindVars[0] = dataObjNumber;
+            cllBindVars[1] = dataObjNumber;
+            cllBindVarCount = 2;
+            if ( logSQL != 0 ) {
+                rodsLog( LOG_SQL, "chlUnregDataObj SQL 3" );
+            }
+            status = cmlExecuteNoAnswerSql(
+                    "delete from R_OBJT_ACCESS where object_id=? and not exists (select * from R_DATA_MAIN where data_id=?)", &icss );
+            if ( status == 0 ) {
+                removeMetaMapAndAVU( dataObjNumber ); /* remove AVU metadata, if any */
+            }
+        }
 
 
 
-      return SUCCESS();
+        return SUCCESS();
     };
     return execTx(&icss, tx);
 
@@ -4714,11 +4744,14 @@ irods::error db_reg_coll_op(
             rodsLog( LOG_SQL, "chlRegColl SQL 1 " );
         }
 
+      char coll_uuid[37];
+      memset(coll_uuid, 0, sizeof(coll_uuid));
       status = cmlCheckDirAndGetInheritFlag( logicalParentDirName,
 					    _ctx.comm()->clientUser.userName,
 					    _ctx.comm()->clientUser.rodsZone,
 					    ACCESS_MODIFY_OBJECT, &inheritFlag,
-					    mySessionTicket, mySessionClientAddr, &icss );
+					    mySessionTicket, mySessionClientAddr, &icss,
+                        coll_uuid, 37); // XXXX - JMC FIXME
       if ( status < 0 ) {
 	  char errMsg[105];
 	  if ( status == CAT_UNKNOWN_COLLECTION ) {
@@ -4917,9 +4950,10 @@ irods::error db_mod_coll_op(
     }
 
     /* Check that collection exists and user has write permission */
+    char coll_id[MAX_NAME_LEN];
     iVal = cmlCheckDir( _coll_info->collName,  _ctx.comm()->clientUser.userName,
                         _ctx.comm()->clientUser.rodsZone,
-                        ACCESS_MODIFY_OBJECT, &icss );
+                        ACCESS_MODIFY_OBJECT, coll_id, &icss );
 
     if ( iVal < 0 ) {
         if ( iVal == CAT_UNKNOWN_COLLECTION ) {
@@ -5332,10 +5366,12 @@ irods::error db_rename_coll_op(
         rodsLog( LOG_SQL, "chlRenameColl SQL 1 " );
     }
 
+    char coll_id_str[MAX_NAME_LEN];
     status1 = cmlCheckDir( _old_coll,
                            _ctx.comm()->clientUser.userName,
                            _ctx.comm()->clientUser.rodsZone,
                            ACCESS_OWN,
+                           coll_id_str,
                            &icss );
 
     if ( status1 < 0 ) {
@@ -5344,7 +5380,7 @@ irods::error db_rename_coll_op(
 
     /* call chlRenameObject to rename */
     std::function<irods::error()> tx = [&] () {
-        return _rename_object( _ctx, status1, _new_coll );
+        return _rename_object( _ctx, coll_id_str, _new_coll );
     };
     
     return execTx(&icss, tx);
@@ -9141,10 +9177,14 @@ irods::error _add_avu_metadata(
 	    if ( logSQL != 0 ) {
 		rodsLog( LOG_SQL, "chlAddAVUMetadata SQL 2" );
 	    }
+#if 0
 	    status = cmlCheckDataObjOnly( logicalParentDirName, logicalEndName,
 					  _ctx.comm()->clientUser.userName,
 					  _ctx.comm()->clientUser.rodsZone,
 					  ACCESS_CREATE_METADATA, &icss );
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
 	}
 	if ( status < 0 ) {
 	    _rollback( "chlAddAVUMetadata" );
@@ -9175,10 +9215,12 @@ irods::error _add_avu_metadata(
 	    if ( logSQL != 0 ) {
 		rodsLog( LOG_SQL, "chlAddAVUMetadata SQL 4" );
 	    }
+
+        char coll_id[MAX_NAME_LEN];
 	    status = cmlCheckDir( _name,
 				  _ctx.comm()->clientUser.userName,
 				  _ctx.comm()->clientUser.rodsZone,
-				  ACCESS_CREATE_METADATA, &icss );
+				  ACCESS_CREATE_METADATA, coll_id, &icss );
 	}
 	if ( status < 0 ) {
 	    char errMsg[105];
@@ -9577,10 +9619,14 @@ irods::error _del_avu_metadata(
 	if ( logSQL != 0 ) {
 	    rodsLog( LOG_SQL, "chlDeleteAVUMetadata SQL 1 " );
 	}
+#if 0
 	status = cmlCheckDataObjOnly( logicalParentDirName, logicalEndName,
 				      _ctx.comm()->clientUser.userName,
 				      _ctx.comm()->clientUser.rodsZone,
 				      ACCESS_DELETE_METADATA, &icss );
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
 	if ( status < 0 ) {
 	    // if ( _nocommit != 1 ) {
 // 		_rollback( "chlDeleteAVUMetadata" );
@@ -9596,10 +9642,11 @@ irods::error _del_avu_metadata(
 	if ( logSQL != 0 ) {
 	    rodsLog( LOG_SQL, "chlDeleteAVUMetadata SQL 2" );
 	}
+    char coll_id[MAX_NAME_LEN];
 	status = cmlCheckDir( _name,
 			      _ctx.comm()->clientUser.userName,
 			      _ctx.comm()->clientUser.rodsZone,
-			      ACCESS_DELETE_METADATA, &icss );
+			      ACCESS_DELETE_METADATA, coll_id, &icss );
 	if ( status < 0 ) {
 	    char errMsg[105];
 	    if ( status == CAT_UNKNOWN_COLLECTION ) {
@@ -10201,10 +10248,12 @@ irods::error db_mod_access_control_op(
 	  if ( logSQL != 0 ) {
 	      rodsLog( LOG_SQL, "chlModAccessControl SQL 1 " );
 	  }
+      char coll_id[MAX_NAME_LEN];
 	  status1 = cmlCheckDir( _path_name,
 				_ctx.comm()->clientUser.userName,
 				_ctx.comm()->clientUser.rodsZone,
 				ACCESS_OWN,
+                coll_id,
 				&icss );
       }
       char collIdStr[MAX_NAME_LEN];
@@ -10257,10 +10306,14 @@ irods::error db_mod_access_control_op(
 	      if ( logSQL != 0 ) {
 		  rodsLog( LOG_SQL, "chlModAccessControl SQL 2" );
 	      }
+#if 0
 	      status2 = cmlCheckDataObjOnly( logicalParentDirName, logicalEndName,
 					    _ctx.comm()->clientUser.userName,
 					    _ctx.comm()->clientUser.rodsZone,
 					    ACCESS_OWN, &icss );
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
 	  }
 	  if ( status2 > 0 ) {
 	      objId = status2;
@@ -10545,7 +10598,7 @@ irods::error db_mod_access_control_op(
 
 irods::error db_rename_object_op(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
+    const char             _obj_id[MAX_NAME_LEN],
     const char*            _new_name ) {
     // check the context
     irods::error ret = _ctx.valid();
@@ -10565,8 +10618,8 @@ irods::error db_rename_object_op(
 
 irods::error _rename_object(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
-    const char*            _new_name ) {
+    char          _obj_uuid_str[MAX_NAME_LEN],
+    const char*   _new_name ) {
     // =-=-=-=-=-=-=-
     // get a postgres object from the context
     /*irods::postgres_object_ptr pg;
@@ -10581,8 +10634,6 @@ irods::error _rename_object(
 //        icatSessionStruct icss;
 //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
     rodsLong_t status;
-    rodsLong_t collId;
-    rodsLong_t otherDataId;
     rodsLong_t otherCollId;
     char myTime[50];
 
@@ -10610,39 +10661,38 @@ irods::error _rename_object(
         return ERROR( CAT_INVALID_ARGUMENT, "new name invalid" );
     }
 
-    /* See if it's a dataObj and if so get the coll_id
-       check the access permission at the same time */
-    collId = 0;
+    snprintf( objIdString, MAX_NAME_LEN, "%s", _obj_uuid_str);
 
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _obj_id );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlRenameObject SQL 1 " );
     }
 
+    char coll_uuid_str[MAX_NAME_LEN];
     {
         std::vector<std::string> bindVars;
         bindVars.push_back( objIdString );
         bindVars.push_back( _ctx.comm()->clientUser.userName );
         bindVars.push_back( _ctx.comm()->clientUser.rodsZone );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_DATA_MAIN DM, R_OBJT_ACCESS OA, R_USER_GROUP UG, R_USER_MAIN UM, R_TOKN_MAIN TM where DM.data_id=? and UM.user_name=? and UM.zone_name=? and UM.user_type_name!='rodsgroup' and UM.user_id = UG.user_id and OA.object_id = DM.data_id and UG.group_user_id = OA.user_id and OA.access_type_id >= TM.token_id and TM.token_namespace ='access_type' and TM.token_name = 'own'",
-                     &collId, bindVars,  &icss );
+                     coll_uuid_str, MAX_NAME_LEN, bindVars,  &icss );
     }
 
     if ( status == 0 ) { /* it is a dataObj and user has access to it */
 
         /* check that no other dataObj exists with this name in this collection*/
-        snprintf( collIdString, MAX_NAME_LEN, "%lld", collId );
+        snprintf( collIdString, MAX_NAME_LEN, "%s", coll_uuid_str );
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlRenameObject SQL 2" );
         }
         {
+            char tmp_obj_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( _new_name );
             bindVars.push_back( collIdString );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select data_id from R_DATA_MAIN where data_name=? and coll_id=?",
-                         &otherDataId, bindVars, &icss );
+                         tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             return ERROR( CAT_NAME_EXISTS_AS_DATAOBJ, "select data_id failed" );
@@ -10655,12 +10705,13 @@ irods::error _rename_object(
             rodsLog( LOG_SQL, "chlRenameObject SQL 3" );
         }
         {
+            char tmp_coll_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( collIdString );
             bindVars.push_back( collNameTmp );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select coll_id from R_COLL_MAIN where coll_name = ( select coll_name from R_COLL_MAIN where coll_id=? ) || ?",
-                         &otherCollId, bindVars, &icss );
+                         tmp_coll_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             return ERROR( CAT_NAME_EXISTS_AS_COLLECTION, "select coll_id failed" );
@@ -10712,7 +10763,7 @@ irods::error _rename_object(
     cVal[1] = collName;
     iVal[1] = MAX_NAME_LEN;
 
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _obj_id );
+    snprintf( objIdString, MAX_NAME_LEN, "%s", _obj_uuid_str );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlRenameObject SQL 6" );
     }
@@ -10734,12 +10785,13 @@ irods::error _rename_object(
             rodsLog( LOG_SQL, "chlRenameObject SQL 7" );
         }
         {
+            char tmp_obj_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( _new_name );
             bindVars.push_back( parentCollName );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select data_id from R_DATA_MAIN where data_name=? and coll_id= (select coll_id from R_COLL_MAIN  where coll_name = ?)",
-                         &otherDataId, bindVars, &icss );
+                         tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             return ERROR( CAT_NAME_EXISTS_AS_DATAOBJ, "select data_id failed" );
@@ -10910,32 +10962,34 @@ irods::error _rename_object(
     /* Both collection and dataObj failed, go thru the sql in smaller
        steps to return a specific error */
 
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _obj_id );
+    snprintf( objIdString, MAX_NAME_LEN, "%s", _obj_uuid_str);
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlRenameObject SQL 12" );
     }
     {
+        char tmp_obj_uuid_str[MAX_NAME_LEN];
         std::vector<std::string> bindVars;
         bindVars.push_back( objIdString );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_DATA_MAIN where data_id=?",
-                     &otherDataId, bindVars, &icss );
+                     tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
     }
     if ( status == 0 ) {
         /* it IS a data obj, must be permission error */
         return ERROR( CAT_NO_ACCESS_PERMISSION, "select coll_id failed" );
     }
 
-    snprintf( collIdString, MAX_NAME_LEN, "%lld", _obj_id );
+    snprintf( collIdString, MAX_NAME_LEN, "%s", coll_uuid_str );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlRenameObject SQL 12" );
     }
     {
+        char tmp_obj_uuid_str[MAX_NAME_LEN];
         std::vector<std::string> bindVars;
         bindVars.push_back( collIdString );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_COLL_MAIN where coll_id=?",
-                     &otherDataId, bindVars, &icss );
+                     tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
     }
     if ( status == 0 ) {
         /* it IS a collection, must be permission error */
@@ -10951,12 +11005,12 @@ irods::error _rename_object(
 
 irods::error _move_object(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
-    rodsLong_t             _target_coll_id ) {
+    const char             _obj_uuid_str[MAX_NAME_LEN],
+    const char             _coll_uuid_str[MAX_NAME_LEN] ) {
     rodsLong_t status;
     rodsLong_t collId;
-    rodsLong_t otherDataId;
-    rodsLong_t otherCollId;
+    //rodsLong_t otherDataId;
+    //rodsLong_t otherCollId;
     char myTime[50];
 
     char dataObjName[MAX_NAME_LEN] = "";
@@ -10981,6 +11035,12 @@ irods::error _move_object(
     char collNameSlash[MAX_NAME_LEN];
     char collNameSlashLen[20];
 
+    std::string obj_uuid_str = _obj_uuid_str;
+    std::string coll_uuid_str = _coll_uuid_str;
+    
+    snprintf( objIdString, MAX_NAME_LEN, "%s", obj_uuid_str.c_str() );
+    snprintf( collIdString, MAX_NAME_LEN, "%s", coll_uuid_str.c_str() );
+
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlMoveObject" );
     }
@@ -10991,13 +11051,12 @@ irods::error _move_object(
     iVal[0] = MAX_NAME_LEN;
     cVal[1] = targetCollName;
     iVal[1] = MAX_NAME_LEN;
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _target_coll_id );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlMoveObject SQL 1 " );
     }
     {
         std::vector<std::string> bindVars;
-        bindVars.push_back( objIdString );
+        bindVars.push_back( collIdString );
         bindVars.push_back( _ctx.comm()->clientUser.userName );
         bindVars.push_back( _ctx.comm()->clientUser.rodsZone );
         status = cmlGetStringValuesFromSql(
@@ -11005,7 +11064,7 @@ irods::error _move_object(
                      cVal, iVal, 2, bindVars, &icss );
 
     }
-    snprintf( collIdString, MAX_NAME_LEN, "%lld", _target_coll_id );
+
     if ( status != 0 ) {
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlMoveObject SQL 2" );
@@ -11028,7 +11087,6 @@ irods::error _move_object(
 
     /* See if we're moving a dataObj and if so get the data_name;
        and at the same time check the access permission */
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _obj_id );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlMoveObject SQL 3" );
     }
@@ -11041,7 +11099,6 @@ irods::error _move_object(
                      "select data_name from R_DATA_MAIN DM, R_OBJT_ACCESS OA, R_USER_GROUP UG, R_USER_MAIN UM, R_TOKN_MAIN TM where DM.data_id=? and UM.user_name=? and UM.zone_name=? and UM.user_type_name!='rodsgroup' and UM.user_id = UG.user_id and OA.object_id = DM.data_id and UG.group_user_id = OA.user_id and OA.access_type_id >= TM.token_id and TM.token_namespace ='access_type' and TM.token_name = 'own'",
                      dataObjName, MAX_NAME_LEN, bindVars, &icss );
     }
-    snprintf( collIdString, MAX_NAME_LEN, "%lld", _target_coll_id );
     if ( status == 0 ) { /* it is a dataObj and user has access to it */
 
         /* check that no other dataObj exists with the ObjName in the
@@ -11050,12 +11107,13 @@ irods::error _move_object(
             rodsLog( LOG_SQL, "chlMoveObject SQL 4" );
         }
         {
+            char tmp_obj_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( dataObjName );
             bindVars.push_back( collIdString );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select data_id from R_DATA_MAIN where data_name=? and coll_id=?",
-                         &otherDataId, bindVars, &icss );
+                         tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             _rollback("_move_object");
@@ -11065,17 +11123,17 @@ irods::error _move_object(
         /* check that no subcoll exists in the target collection, with
            the name of the object */
         /* //not needed, I think   snprintf(collIdString, MAX_NAME_LEN, "%d", collId); */
-        snprintf( nameTmp, MAX_NAME_LEN, "/%s", dataObjName );
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlMoveObject SQL 5" );
         }
         {
+            char tmp_coll_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( collIdString );
             bindVars.push_back( nameTmp );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select coll_id from R_COLL_MAIN where coll_name = ( select coll_name from R_COLL_MAIN where coll_id=? ) || ?",
-                         &otherCollId, bindVars, &icss );
+                         tmp_coll_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             _rollback("_move_object");
@@ -11170,9 +11228,10 @@ irods::error _move_object(
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlMoveObject SQL 9" );
         }
+        char tmp_coll_id[MAX_NAME_LEN];
         status = cmlCheckDir( parentCollName,  _ctx.comm()->clientUser.userName,
                               _ctx.comm()->clientUser.rodsZone,
-                              ACCESS_MODIFY_OBJECT, &icss );
+                              ACCESS_MODIFY_OBJECT, tmp_coll_id, &icss );
         if ( status < 0 ) {
             _rollback("_move_object");
             return ERROR( status, "cmlCheckDir failed" );
@@ -11180,17 +11239,18 @@ irods::error _move_object(
 
         /* check that no other dataObj exists with the ObjName in the
            target collection */
-        snprintf( collIdString, MAX_NAME_LEN, "%lld", _target_coll_id );
+        snprintf( collIdString, MAX_NAME_LEN, "%s", coll_uuid_str.c_str() );
         if ( logSQL != 0 ) {
             rodsLog( LOG_SQL, "chlMoveObject SQL 10" );
         }
         {
+            char tmp_obj_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( endCollName );
             bindVars.push_back( collIdString );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select data_id from R_DATA_MAIN where data_name=? and coll_id=?",
-                         &otherDataId, bindVars, &icss );
+                         tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             _rollback("_move_object");
@@ -11207,11 +11267,12 @@ irods::error _move_object(
             rodsLog( LOG_SQL, "chlMoveObject SQL 11" );
         }
         {
+            char tmp_coll_uuid_str[MAX_NAME_LEN];
             std::vector<std::string> bindVars;
             bindVars.push_back( newCollName );
-            status = cmlGetIntegerValueFromSql(
+            status = cmlGetStringValueFromSql(
                          "select coll_id from R_COLL_MAIN where coll_name = ?",
-                         &otherCollId, bindVars, &icss );
+                         tmp_coll_uuid_str, MAX_NAME_LEN, bindVars, &icss );
         }
         if ( status != CAT_NO_ROWS_FOUND ) {
             _rollback("_move_object");
@@ -11340,16 +11401,17 @@ irods::error _move_object(
 
     /* Both collection and dataObj failed, go thru the sql in smaller
        steps to return a specific error */
-    snprintf( objIdString, MAX_NAME_LEN, "%lld", _obj_id );
+    snprintf( objIdString, MAX_NAME_LEN, "%s", obj_uuid_str.c_str() );
     if ( logSQL != 0 ) {
         rodsLog( LOG_SQL, "chlMoveObject SQL 14" );
     }
     {
+        char tmp_obj_uuid_str[MAX_NAME_LEN];
         std::vector<std::string> bindVars;
         bindVars.push_back( objIdString );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_DATA_MAIN where data_id=?",
-                     &otherDataId, bindVars, &icss );
+                     tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
     }
     if ( status == 0 ) {
         /* it IS a data obj, must be permission error */
@@ -11360,11 +11422,12 @@ irods::error _move_object(
         rodsLog( LOG_SQL, "chlMoveObject SQL 15" );
     }
     {
+        char tmp_obj_uuid_str[MAX_NAME_LEN];
         std::vector<std::string> bindVars;
         bindVars.push_back( objIdString );
-        status = cmlGetIntegerValueFromSql(
+        status = cmlGetStringValueFromSql(
                      "select coll_id from R_COLL_MAIN where coll_id=?",
-                     &otherDataId, bindVars, &icss );
+                     tmp_obj_uuid_str, MAX_NAME_LEN, bindVars, &icss );
     }
     if ( status == 0 ) {
         /* it IS a collection, must be permission error */
@@ -11373,12 +11436,12 @@ irods::error _move_object(
 
     return ERROR( CAT_NOT_A_DATAOBJ_AND_NOT_A_COLLECTION, "invalid object or collection" );
 
-} // db_move_object_op
+} // _move_object
 
 irods::error db_move_object_op(
     irods::plugin_context& _ctx,
-    rodsLong_t             _obj_id,
-    rodsLong_t             _target_coll_id ) {
+    const char             _obj_uuid_str[MAX_NAME_LEN],
+    const char             _coll_uuid_str[MAX_NAME_LEN] ) {
     // check the context
     irods::error ret = _ctx.valid();
     if ( !ret.ok() ) {
@@ -11399,7 +11462,7 @@ irods::error db_move_object_op(
 //        icatSessionStruct icss;
 //        _ctx.prop_map().get< icatSessionStruct >( ICSS_PROP, icss );
     std::function<irods::error()> tx = [&] () {
-        return _move_object(_ctx, _obj_id, _target_coll_id);
+        return _move_object(_ctx, _obj_uuid_str, _coll_uuid_str);
     };
     
     return execTx(&icss, tx);
@@ -13874,18 +13937,23 @@ irods::error db_mod_ticket_op(
               snprintf( logicalParentDirName, sizeof( logicalParentDirName ), "%s", PATH_SEPARATOR );
               snprintf( logicalEndName, sizeof( logicalEndName ), "%s", _arg4 + 1 );
           }
+#if 0
           status2 = cmlCheckDataObjOnly( logicalParentDirName, logicalEndName,
                                          _ctx.comm()->clientUser.userName,
                                          _ctx.comm()->clientUser.rodsZone,
                                          ACCESS_OWN, &icss );
+#else
+THROW(SYS_NOT_SUPPORTED, "XXXX - FIXME");
+#endif
           if ( status2 > 0 ) {
               snprintf( objTypeStr, sizeof( objTypeStr ), "%s", TICKET_TYPE_DATA );
               objId = status2;
           }
           else {
+              char coll_id[MAX_NAME_LEN];
               status3 = cmlCheckDir( _arg4,   _ctx.comm()->clientUser.userName,
                                      _ctx.comm()->clientUser.rodsZone,
-                                     ACCESS_OWN, &icss );
+                                     ACCESS_OWN, coll_id, &icss );
               if ( status3 == CAT_NO_ROWS_FOUND && status2 == CAT_NO_ROWS_FOUND ) {
                   return ERROR( CAT_UNKNOWN_COLLECTION, _arg4 );
               }
@@ -14837,13 +14905,13 @@ irods::database* plugin_factory(
         DATABASE_OP_MOD_ACCESS_CONTROL,
         function<error(plugin_context&,int,const char*,const char*,const char*,const char*)>(
             db_mod_access_control_op ) );
-    pg->add_operation<rodsLong_t,const char*>(
+    pg->add_operation<const char*,const char*>(
         DATABASE_OP_RENAME_OBJECT,
-        function<error(plugin_context&,rodsLong_t,const char*)>(
+        function<error(plugin_context&,const char*,const char*)>(
             db_rename_object_op ) );
-    pg->add_operation<rodsLong_t,rodsLong_t>(
+    pg->add_operation<const char*,const char*>(
         DATABASE_OP_MOVE_OBJECT,
-        function<error(plugin_context&,rodsLong_t,rodsLong_t)>(
+        function<error(plugin_context&,const char*,const char*)>(
             db_move_object_op ) );
     pg->add_operation<const char*,const char*,const char*,const char*,const char*,const char*>(
         DATABASE_OP_REG_TOKEN,
